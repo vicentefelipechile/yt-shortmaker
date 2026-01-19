@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+    <metadata>
+        <name>AutoShorts-Rust-CLI</name>
+        <version>1.3.0</version>
+        <description>A robust CLI tool built in Rust to automate the creation of YouTube Shorts from long-form content. It features a persistent settings system, an interactive real-time dashboard with uptime tracking, and leverages Google Gemini AI for intelligent content analysis.</description>
+        <target_audience>Content Creators, Streamers, Video Editors, and Developers.</target_audience>
+    </metadata>
+
+    <settings>
+        <setting name="code_quality" value="high" note="Use idiomatic Rust. Prefer Result&lt;T, E&gt; for error handling." />
+        <setting name="async_runtime" value="tokio" note="Use Tokio for asynchronous operations." />
+        <setting name="ui_feedback" value="dashboard" note="The UI must display a persistent header with project info and a dynamic status line with uptime." />
+        <setting name="config_persistence" value="json" note="Configuration saved in 'settings.json'." />
+        <setting name="safety" value="robust" note="Ensure external binaries (ffmpeg, yt-dlp) are present before execution." />
+    </settings>
+
+    <categories>
+        <category name="Tech_Stack">
+            <language>Rust (Latest Stable)</language>
+            <external_tools>
+                <tool name="ffmpeg">Required for video splitting and trimming.</tool>
+                <tool name="yt-dlp">Required for downloading video streams.</tool>
+            </external_tools>
+            <libraries>
+                <lib name="tokio">Async runtime (features = ["full"]).</lib>
+                <lib name="serde">Serialization (features = ["derive"]).</lib>
+                <lib name="serde_json">JSON parsing.</lib>
+                <lib name="reqwest">HTTP Client (features = ["json", "multipart"]).</lib>
+                <lib name="anyhow">Error handling.</lib>
+                <lib name="indicatif">Advanced progress bars and status lines.</lib>
+                <lib name="console">For terminal manipulation (clearing screen, colors).</lib>
+                <lib name="dialoguer">User inputs (Input, Confirm, Select).</lib>
+                <lib name="chrono">For time formatting (optional).</lib>
+            </libraries>
+        </category>
+
+        <category name="Configuration_Management">
+            <description>Logic to handle the 'settings.json' file. This runs before any video processing to ensure API keys and paths are available.</description>
+            <file_name>settings.json</file_name>
+            <fields>
+                <field name="google_api_key" type="String" required="true">Gemini API Key.</field>
+                <field name="default_output_dir" type="String" required="true" default="./output">Output folder.</field>
+            </fields>
+            <code type="production"><![CDATA[
+use serde::{Deserialize, Serialize};
+use dialoguer::{Input, theme::ColorfulTheme};
+use std::fs;
+use std::path::Path;
+use anyhow::Result;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AppConfig {
+    pub google_api_key: String,
+    pub default_output_dir: String,
+}
+
+impl AppConfig {
+    pub fn load_or_create() -> Result<Self> {
+        let config_path = "settings.json";
+
+        // Check if file exists
+        if Path::new(config_path).exists() {
+            let content = fs::read_to_string(config_path)?;
+            let config: AppConfig = serde_json::from_str(&content)?;
+            return Ok(config);
+        }
+
+        // If not, prompt user
+        println!("Configuration file not found. Let's set it up!");
+
+        let api_key: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Please enter your Google Gemini API Key")
+            .interact_text()?;
+
+        let output_dir: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter default output folder")
+            .default("./output".to_string())
+            .interact_text()?;
+
+        let new_config = AppConfig {
+            google_api_key: api_key,
+            default_output_dir: output_dir,
+        };
+
+        // Save to file
+        let json = serde_json::to_string_pretty(&new_config)?;
+        fs::write(config_path, json)?;
+        
+        println!("Settings saved to {}", config_path);
+        Ok(new_config)
+    }
+}
+]]></code>
+        </category>
+
+        <category name="UI_Dashboard">
+            <description>
+                Defines the visual interface of the CLI. It handles clearing the screen, showing the banner, and maintaining a persistent status line with uptime.
+            </description>
+            <code type="production"><![CDATA[
+use indicatif::{ProgressBar, ProgressStyle};
+use console::{Term, style};
+use std::time::Duration;
+
+pub struct Dashboard {
+    main_spinner: ProgressBar,
+}
+
+impl Dashboard {
+    pub fn init(version: &str, output_dir: &str) -> Self {
+        // 1. Clear Screen
+        let term = Term::stdout();
+        term.clear_screen().ok();
+
+        // 2. Print Static Header
+        println!("{}", style("============================================").cyan().bold());
+        println!("   {} v{}", style("AUTOSHORTS-RUST-CLI").magenta().bold(), version);
+        println!("   Target: {}", style(output_dir).yellow());
+        println!("   Status: {}", style("Active").green());
+        println!("{}", style("============================================").cyan().bold());
+        println!(""); // Spacer
+
+        // 3. Setup Persistent Spinner with Uptime
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {msg}"
+        ).unwrap().tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+        
+        pb.enable_steady_tick(Duration::from_millis(100));
+
+        Dashboard { main_spinner: pb }
+    }
+
+    pub fn set_status(&self, message: &str) {
+        self.main_spinner.set_message(message.to_string());
+    }
+
+    pub fn success(&self, message: &str) {
+        self.main_spinner.finish_with_message(format!("✔ {}", message));
+    }
+    
+    pub fn error(&self, message: &str) {
+        self.main_spinner.abandon_with_message(format!("✘ {}", message));
+    }
+}
+]]></code>
+        </category>
+
+        <category name="AI_Integration_Gemini">
+            <description>Configuration for the Google Gemini API interaction including the System Prompt and Data Structures.</description>
+            <model>gemini-3-pro-preview</model>
+            <system_prompt>
+                You are a professional video editor assistant. Your task is to analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
+                
+                You must return the response STRICTLY in JSON format. Do not include markdown formatting.
+                
+                Identify moments that fit these categories:
+                - Funny
+                - Interesting
+                - Incredible Play
+                - Other
+                
+                Constraints:
+                1. Duration: 10 seconds to 90 seconds.
+                2. Provide a brief description.
+                3. Use timestamp format "HH:MM:SS".
+                
+                Output structure example:
+                [{"start_time": "00:05:20", "end_time": "00:06:10", "category": "Funny", "description": "Player falls."}]
+            </system_prompt>
+            <code type="example"><![CDATA[
+// Example of struct for Gemini Response in Rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VideoMoment {
+    start_time: String,
+    end_time: String,
+    category: String,
+    description: String,
+}
+
+// Hint for API interaction
+// Ensure you handle the multipart/form-data upload for the video file first, 
+// obtain the URI, and then send the prompt with the URI to the 'generateContent' endpoint.
+]]></code>
+        </category>
+
+        <category name="Video_Processing_Commands">
+            <description>Logic for external tools (ffmpeg/yt-dlp) and chunk calculation strategies.</description>
+            <command_templates>
+                <yt_dlp_low_res>yt-dlp -f "bestvideo[height&lt;=360]+bestaudio/best[height&lt;=360]" --merge-output-format mp4 -o "temp_low_res.mp4" [URL]</yt_dlp_low_res>
+                <yt_dlp_high_res>yt-dlp -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "source_high_res.mp4" [URL]</yt_dlp_high_res>
+                <ffmpeg_split>ffmpeg -i input.mp4 -ss [START] -t [DURATION] -c copy chunk_N.mp4</ffmpeg_split>
+                <ffmpeg_extract>ffmpeg -i source.mp4 -ss [START] -to [END] -c:v libx264 -c:a aac -strict experimental [OUTPUT_DIR]/short_N.mp4</ffmpeg_extract>
+            </command_templates>
+            
+            <code type="best-practices" note="Chunk Calculation Logic"><![CDATA[
+// Logic: Split by 30 mins. If last chunk <= 45 mins, merge it.
+fn calculate_chunks(total_duration_seconds: u64) -> Vec<(u64, u64)> {
+    let chunk_size = 30 * 60; // 30 mins
+    let max_last_chunk = 45 * 60; // 45 mins
+    let mut chunks = Vec::new();
+    let mut current_time = 0;
+
+    while current_time < total_duration_seconds {
+        let remaining = total_duration_seconds - current_time;
+        
+        if remaining <= max_last_chunk {
+            // Keep the last part whole if it's within the buffer
+            chunks.push((current_time, remaining));
+            break;
+        } else {
+            // Standard split
+            chunks.push((current_time, chunk_size));
+            current_time += chunk_size;
+        }
+    }
+    chunks
+}
+]]></code>
+            <code type="best-practices" note="Dependency Check"><![CDATA[
+use std::process::Command;
+
+fn check_dependencies() -> bool {
+    let ffmpeg = Command::new("ffmpeg").arg("-version").output().is_ok();
+    let ytdlp = Command::new("yt-dlp").arg("--version").output().is_ok();
+    
+    if !ffmpeg { println!("Error: ffmpeg not found."); }
+    if !ytdlp { println!("Error: yt-dlp not found."); }
+    
+    ffmpeg && ytdlp
+}
+]]></code>
+        </category>
+
+        <category name="Workflow_Logic">
+            <step sequence="1">Load Config `AppConfig::load_or_create()`.</step>
+            <step sequence="2">Check Dependencies (`check_dependencies`). Exit if false.</step>
+            <step sequence="3">Initialize `Dashboard` (Clear screen, show banner).</step>
+            <step sequence="4">Dashboard: "Validating URL...".</step>
+            <step sequence="5">Dashboard: "Downloading Low-Res...". Execute `yt-dlp_low_res`.</step>
+            <step sequence="6">Dashboard: "Splitting Video...". Use `calculate_chunks` logic + `ffmpeg_split`.</step>
+            <step sequence="7">Dashboard: "Analyzing (Gemini)...". Upload each chunk and wait for JSON.</step>
+            <step sequence="8">Aggregate JSON results into `moments.txt`.</step>
+            <step sequence="9">Interactive (Dialoguer): Ask "Generate Shorts from source?".</step>
+            <step sequence="10">If Yes: Dashboard "Downloading High-Res...". Execute `yt-dlp_high_res`.</step>
+            <step sequence="11">Dashboard: "Extracting clips...". Execute `ffmpeg_extract` loop.</step>
+            <step sequence="12">Dashboard: "Done! Saved to [output_dir]".</step>
+        </category>
+    </categories>
+</project>
