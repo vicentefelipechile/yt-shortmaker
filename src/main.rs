@@ -14,7 +14,6 @@ use config::AppConfig;
 use crossterm::event::{self, Event, KeyEventKind};
 use gemini::GeminiClient;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 use tui::{App, AppMessage, AppScreen, LogLevel, TuiSender};
@@ -270,66 +269,24 @@ async fn run_app(
         std::process::exit(1);
     }
 
+    // Initialize app state
+    let mut app = App::new(config.default_output_dir.clone());
+    app.config = Some(config.clone());
+    app.status = "Ready".to_string();
+
     // Check for NVENC availability if not configured
+    // If detected, we start at the GpuDetectionPrompt screen instead of UrlInput/Resume
+    let mut nvenc_detected = false;
     if config.gpu_acceleration.is_none() {
         if video::check_nvenc_availability() {
-            tui::restore_terminal(terminal)?;
-            println!("\n🚀 NVIDIA GPU detected!");
-            print!("   Do you want to use NVENC for faster rendering? (y/n): ");
-            std::io::stdout().flush().ok();
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).ok();
-
-            let use_gpu = input.trim().to_lowercase().starts_with('y');
-
-            // Reload config, update, and save
-            let mut new_config = config.clone();
-            new_config.gpu_acceleration = Some(use_gpu);
-            if let Err(e) = new_config.save() {
-                eprintln!("⚠️ Failed to save configuration: {}", e);
-            }
-
-            // Re-setup terminal
-            *terminal = tui::setup_terminal()?;
-
-            // Update the local config variable
-            // Since config is immutable, we need to handle this.
-            // Better to re-load or just return the new config from a helper?
-            // Actually config is passed by value to run_app but we are inside run_app.
-            // Wait, run_app takes terminal. logic should be BEFORE run_app call?
-            // No, run_app is where `config` is loaded.
-            // But run_app has `terminal` already setup.
-            // If I restore terminal here, I need to setup it again.
-            // Yes, I did that above.
-
-            // But `config` variable needs to be updated.
-            // Rust doesn't allow re-assigning immutable `config`.
-            // I should change `let config` to `let mut config`.
+            nvenc_detected = true;
         } else {
-            // GPU not detected, verify expectation and set to false to avoid future checks?
-            // Or just leave as None means "check again next time"?
-            // Logic: If check fails, we can assume false.
-            // But maybe user installs drivers later.
-            // Let's leave it as None or set to false.
-            // Setting to false prevents checking again.
+            // GPU not detected, set to false to avoid future checks
             let mut new_config = config.clone();
             new_config.gpu_acceleration = Some(false);
             new_config.save().ok();
         }
     }
-
-    // Refresh config if it was updated
-    let config = if let Ok(c) = AppConfig::load() {
-        c
-    } else {
-        config
-    };
-
-    // Initialize app state
-    let mut app = App::new(config.default_output_dir.clone());
-    app.config = Some(config.clone());
-    app.status = "Ready".to_string();
 
     // Create message channel for async communication
     let (tx, mut rx) = tui::create_channel();
@@ -339,18 +296,22 @@ async fn run_app(
     let mut session: Option<SessionState> = None;
     let mut resume_prompted = false;
 
-    if Path::new(&temp_json_path).exists() {
-        if let Ok(content) = fs::read_to_string(&temp_json_path) {
-            if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content) {
-                app.screen = AppScreen::ResumePrompt(existing_session.youtube_url.clone());
-                session = Some(existing_session);
-                resume_prompted = true;
+    if nvenc_detected {
+        app.screen = AppScreen::GpuDetectionPrompt;
+    } else {
+        if Path::new(&temp_json_path).exists() {
+            if let Ok(content) = fs::read_to_string(&temp_json_path) {
+                if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content) {
+                    app.screen = AppScreen::ResumePrompt(existing_session.youtube_url.clone());
+                    session = Some(existing_session);
+                    resume_prompted = true;
+                }
             }
         }
-    }
 
-    if !resume_prompted {
-        app.screen = AppScreen::UrlInput;
+        if !resume_prompted {
+            app.screen = AppScreen::UrlInput;
+        }
     }
 
     // Main event loop
@@ -385,6 +346,49 @@ async fn run_app(
 
         // Handle screen transitions
         match &app.screen {
+            AppScreen::GpuDetectionPrompt => {
+                if let Some(response) = app.confirm_response.take() {
+                    // Update config
+                    let use_gpu = response;
+
+                    // We need to update both the local config variable (for this run)
+                    // and the saved file (for future runs).
+                    // However, 'config' is immutable here.
+                    // But app.config is mutable.
+                    if let Some(ref mut c) = app.config {
+                        c.gpu_acceleration = Some(use_gpu);
+                        if let Err(e) = c.save() {
+                            app.log(LogLevel::Error, format!("Failed to save settings: {}", e));
+                        } else {
+                            app.log(LogLevel::Success, "Settings saved!".to_string());
+                        }
+                    }
+
+                    // Now proceed to Resume check or Url Input
+                    // We duplicate the logic from above, but 'nvenc_detected' is logically handled now.
+                    // Actually, we can check for session here.
+                    // IMPORTANT: We need to know if we should go to ResumePrompt or UrlInput.
+                    // Re-check for session file.
+                    if Path::new(&temp_json_path).exists() {
+                        if let Ok(content) = fs::read_to_string(&temp_json_path) {
+                            if let Ok(existing_session) =
+                                serde_json::from_str::<SessionState>(&content)
+                            {
+                                app.screen =
+                                    AppScreen::ResumePrompt(existing_session.youtube_url.clone());
+                                session = Some(existing_session);
+                                resume_prompted = true; // Just local var, doesn't matter much here
+                            } else {
+                                app.screen = AppScreen::UrlInput;
+                            }
+                        } else {
+                            app.screen = AppScreen::UrlInput;
+                        }
+                    } else {
+                        app.screen = AppScreen::UrlInput;
+                    }
+                }
+            }
             AppScreen::ResumePrompt(_) => {
                 if let Some(response) = app.confirm_response.take() {
                     if response {
@@ -547,23 +551,13 @@ fn load_config_with_fallback() -> Result<AppConfig> {
         return Ok(config);
     }
 
-    // Create default config - in TUI we can't do interactive prompts easily
-    // So we'll ask user to create settings.json manually or use environment variables
-    Err(anyhow::anyhow!(
-        "Configuration file not found. Please create settings.json with the following format:\n\
-        {{\n  \
-            \"google_api_keys\": [\"YOUR_API_KEY\"],\n  \
-            \"default_output_dir\": \"./output\",\n  \
-            \"extract_shorts_when_finished_moments\": false,\n  \
-            \"use_cookies\": false,\n  \
-            \"cookies_path\": \"./cookies.json\",\n  \
-            \"shorts_config\": {{\n    \
-                \"background_video\": \"./background.mp4\",\n    \
-                \"background_opacity\": 0.4,\n    \
-                \"overlays\": []\n  \
-            }}\n\
-        }}"
-    ))
+    // Create default config automatically
+    println!("📝 Configuration file not found. Creating default settings.json...");
+    AppConfig::create_default()?;
+
+    // Load the newly created config
+    let config = AppConfig::load()?;
+    Ok(config)
 }
 
 /// Run the main processing pipeline

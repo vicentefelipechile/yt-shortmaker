@@ -72,6 +72,8 @@ pub enum AppScreen {
     Processing,
     /// Shorts generation confirmation
     ShortsConfirm(usize),
+    /// GPU Detection Prompt
+    GpuDetectionPrompt,
     /// Completed
     Done,
 }
@@ -200,20 +202,21 @@ impl App {
                 }
                 _ => {}
             },
-            AppScreen::ResumePrompt(_) | AppScreen::FormatConfirm | AppScreen::ShortsConfirm(_) => {
-                match key {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        self.confirm_response = Some(true);
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.confirm_response = Some(false);
-                    }
-                    KeyCode::Esc => {
-                        self.should_quit = true;
-                    }
-                    _ => {}
+            AppScreen::ResumePrompt(_)
+            | AppScreen::FormatConfirm
+            | AppScreen::ShortsConfirm(_)
+            | AppScreen::GpuDetectionPrompt => match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.confirm_response = Some(true);
                 }
-            }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.confirm_response = Some(false);
+                }
+                KeyCode::Esc => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            },
             AppScreen::Processing => match key {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     self.should_quit = true;
@@ -372,8 +375,33 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::FormatConfirm => render_format_confirm(frame, area),
         AppScreen::Processing => render_processing(frame, app, area),
         AppScreen::ShortsConfirm(count) => render_shorts_confirm(frame, *count, area),
+        AppScreen::GpuDetectionPrompt => render_gpu_prompt(frame, area),
         AppScreen::Done => render_done(frame, app, area),
     }
+}
+
+fn render_gpu_prompt(frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" 🚀 Hardware Acceleration Detected ");
+
+    let text = Text::from(vec![
+        Line::from(""),
+        Line::from("NVIDIA GPU detected!"),
+        Line::from(""),
+        Line::from("Do you want to use NVENC for faster video rendering?"),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("(Y)es - Use NVENC "),
+            Span::styled("(Recommended)", Style::default().fg(Color::Green)),
+        ]),
+        Line::from("(N)o  - Use CPU encoding"),
+        Line::from(""),
+    ]);
+
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_setup(frame: &mut Frame, _app: &App, area: Rect) {
@@ -622,9 +650,10 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let shortcuts = match &app.screen {
         AppScreen::UrlInput => "Enter: Submit | Esc: Quit",
-        AppScreen::ResumePrompt(_) | AppScreen::FormatConfirm | AppScreen::ShortsConfirm(_) => {
-            "Y: Yes | N: No | Esc: Quit"
-        }
+        AppScreen::ResumePrompt(_)
+        | AppScreen::FormatConfirm
+        | AppScreen::ShortsConfirm(_)
+        | AppScreen::GpuDetectionPrompt => "Y: Yes | N: No | Esc: Quit",
         AppScreen::Processing => "Q/Esc: Quit",
         AppScreen::Done => "Press any key to exit",
         _ => "Esc: Quit",
