@@ -596,14 +596,57 @@ async fn run_app(
                     });
                 }
             }
-            AppScreen::ShortsConfirm(count) => {
+            AppScreen::ShortsConfirm(_) => {
                 if let Some(response) = app.confirm_response.take() {
                     if response {
                         app.log(LogLevel::Info, "Generating shorts...".to_string());
+
+                        // Start extraction background task
+                        let tx_clone = tx.clone();
+                        let config_clone = app.config.clone().unwrap_or(config.clone());
+                        let url_clone = url.clone();
+                        let temp_dir_clone = temp_dir.clone();
+                        let temp_json_path_clone =
+                            format!("{}/temp.json", config_clone.default_output_dir);
+                        let custom_format_clone = custom_format.clone();
+                        let moments_clone = app.moments.clone();
+
+                        // We go back to processing screen to show progress
+                        app.screen = AppScreen::Processing;
+
+                        tokio::spawn(async move {
+                            let result = run_extraction(
+                                tx_clone.clone(),
+                                config_clone,
+                                url_clone,
+                                temp_dir_clone,
+                                temp_json_path_clone,
+                                custom_format_clone,
+                                moments_clone,
+                            )
+                            .await;
+
+                            match result {
+                                Ok((_, shorts_dir)) => {
+                                    if let Some(dir) = shorts_dir {
+                                        let _ = tx_clone.send(AppMessage::Complete(format!(
+                                            "Shorts saved to: {}",
+                                            dir
+                                        )));
+                                    }
+                                    let _ = tx_clone.send(AppMessage::Finished);
+                                }
+                                Err(e) => {
+                                    let _ =
+                                        tx_clone.send(AppMessage::Error(format!("Error: {}", e)));
+                                    let _ = tx_clone.send(AppMessage::Finished);
+                                }
+                            }
+                        });
                     } else {
                         app.log(LogLevel::Info, "Skipping shorts generation".to_string());
+                        app.screen = AppScreen::Done;
                     }
-                    app.screen = AppScreen::Done;
                 }
             }
             AppScreen::Done => {
@@ -828,15 +871,32 @@ async fn run_processing(
     let generate_shorts = config.extract_shorts_when_finished_moments;
 
     if !generate_shorts {
-        let _ = tx.send(AppMessage::Log(
-            LogLevel::Info,
-            "Moments saved. Skipping extraction (auto-extract disabled)".to_string(),
-        ));
-        cleanup_temp_dir(&temp_dir)?;
-        fs::remove_file(&temp_json_path).ok();
+        let _ = tx.send(AppMessage::RequestShortsConfirm(all_moments.len()));
         return Ok((all_moments, None));
     }
 
+    run_extraction(
+        tx,
+        config,
+        url,
+        temp_dir,
+        temp_json_path,
+        custom_format,
+        all_moments,
+    )
+    .await
+}
+
+/// Run the extraction phase (high-res download and clipping)
+async fn run_extraction(
+    tx: TuiSender,
+    config: AppConfig,
+    url: String,
+    temp_dir: String,
+    temp_json_path: String,
+    custom_format: Option<String>,
+    all_moments: Vec<VideoMoment>,
+) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Download high-res
     let _ = tx.send(AppMessage::Status(
         "Downloading High-Res video...".to_string(),
