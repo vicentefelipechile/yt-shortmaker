@@ -381,7 +381,7 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::Processing => render_processing(frame, app, area),
         AppScreen::ShortsConfirm(count) => render_shorts_confirm(frame, *count, area),
         AppScreen::GpuDetectionPrompt => render_gpu_prompt(frame, area),
-        AppScreen::Done => render_done(frame, app, area),
+        AppScreen::Done => render_processing(frame, app, area),
     }
 }
 
@@ -512,14 +512,28 @@ fn render_processing(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // Progress bar
-    let progress_block = Block::default().borders(Borders::ALL).title(" Progress ");
+    // Progress bar customization based on state
+    let (prog_title, prog_color) = match app.screen {
+        AppScreen::Done => {
+            if app.has_error {
+                (" ❌ Failed ", Color::Red)
+            } else {
+                (" ✅ Complete ", Color::Green)
+            }
+        }
+        _ => (" Progress ", Color::Cyan),
+    };
+
+    let progress_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(prog_color))
+        .title(prog_title);
 
     let progress_inner = progress_block.inner(layout[0]);
     frame.render_widget(progress_block, layout[0]);
 
     let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+        .gauge_style(Style::default().fg(prog_color).bg(Color::DarkGray))
         .percent((app.progress * 100.0) as u16)
         .label(&app.progress_label);
     frame.render_widget(gauge, progress_inner);
