@@ -352,23 +352,7 @@ pub fn generate_preview(
     args.push("-frames:v".to_string());
     args.push("1".to_string());
 
-    if use_gpu {
-        // Even for single frame, using NVENC might be faster or just consistent
-        // But strictly speaking, for 1 frame, overhead might differ.
-        // However, consistency matters.
-        // NOTE: generating single frame via hardware decoder/encoder might be complex with filters.
-        // Let's stick to software for preview if it's just one frame?
-        // Actually, if input is decoded with hardware, it's better.
-        // BUT, `generate_preview` output is PNG usually.
-        // We are encoding to image, so -c:v h264_nvenc IS NOT VALID for png output.
-        // If output is image, we don't use video encoder.
-        // So we probably DON'T need use_gpu for the OUTPUT encoding of the preview image.
-        // But maybe for INPUT decoding? ffmpeg selects automatically usually.
-        // Let's keep it simple and NOT use NVENC for the output image encoding (it uses mjpeg or png encoder).
-        // So this block is just to acknowledge `use_gpu` argument usage even if we don't apply it to output.
-        // OR we apply it to input decoding? `-c:v h264_cuvid`? Too risky for compatibility.
-        // Let's just ignore use_gpu for preview output encoding on image.
-    }
+    if use_gpu {}
 
     args.push("-y".to_string());
     args.push(output_image.to_string());

@@ -13,7 +13,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
@@ -42,7 +42,7 @@ pub enum AppMessage {
     RequestUrl,
     /// Request format selection confirmation
     RequestFormatConfirm,
-    /// Request shorts generation confirmation
+    /// Request    /// Shorts generation confirmation
     RequestShortsConfirm(usize),
     /// Processing finished, ready to exit
     Finished,
@@ -62,6 +62,12 @@ pub enum LogLevel {
 pub enum AppScreen {
     /// Initial loading/setup
     Setup,
+    /// First run API Key input
+    ApiKeyInput,
+    /// Main Menu
+    MainMenu,
+    /// Settings Editor
+    SettingsEditor,
     /// Asking for resume
     ResumePrompt(String), // URL to resume
     /// URL input
@@ -84,6 +90,24 @@ pub struct LogEntry {
     pub level: LogLevel,
     pub message: String,
     pub timestamp: String,
+}
+
+/// Simple enum to represent a setting type for editing
+#[derive(Debug, Clone)]
+pub enum SettingType {
+    String,
+    Bool,
+    Float,
+}
+
+/// Definition of a setting to be edited
+#[derive(Debug, Clone)]
+pub struct SettingItem {
+    pub name: String,
+    pub key: String, // Internal key like "output_dir"
+    pub value: String,
+    pub kind: SettingType,
+    pub description: String,
 }
 
 /// Main application state
@@ -118,6 +142,18 @@ pub struct App {
     pub config: Option<AppConfig>,
     /// Whether an error occurred during processing
     pub has_error: bool,
+
+    // -- Menu & Settings State --
+    /// Menu selection index
+    pub menu_index: usize,
+    /// Settings selection index
+    pub settings_index: usize,
+    /// Whether we are currently editing a setting
+    pub editing_setting: bool,
+    /// Buffer for editing a setting
+    pub setting_input: String,
+    /// List of editable settings
+    pub settings_items: Vec<SettingItem>,
 }
 
 impl App {
@@ -139,6 +175,99 @@ impl App {
             result_message: None,
             config: None,
             has_error: false,
+            menu_index: 0,
+            settings_index: 0,
+            editing_setting: false,
+            setting_input: String::new(),
+            settings_items: Vec::new(),
+        }
+    }
+
+    /// Reload settings items from current config
+    pub fn reload_settings_items(&mut self) {
+        if let Some(config) = &self.config {
+            self.settings_items = vec![
+                SettingItem {
+                    name: "Output Directory".to_string(),
+                    key: "output_dir".to_string(),
+                    value: config.default_output_dir.clone(),
+                    kind: SettingType::String,
+                    description: "Directory where shorts are saved".to_string(),
+                },
+                SettingItem {
+                    name: "Auto Extract".to_string(),
+                    key: "auto_extract".to_string(),
+                    value: config.extract_shorts_when_finished_moments.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Extract shorts automatically after analysis".to_string(),
+                },
+                SettingItem {
+                    name: "Use Cookies".to_string(),
+                    key: "use_cookies".to_string(),
+                    value: config.use_cookies.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Use cookies for yt-dlp".to_string(),
+                },
+                SettingItem {
+                    name: "Cookies Path".to_string(),
+                    key: "cookies_path".to_string(),
+                    value: config.cookies_path.clone(),
+                    kind: SettingType::String,
+                    description: "Path to cookies.txt/json".to_string(),
+                },
+                SettingItem {
+                    name: "GPU Acceleration".to_string(),
+                    key: "gpu".to_string(),
+                    value: config.gpu_acceleration.unwrap_or(false).to_string(),
+                    kind: SettingType::Bool,
+                    description: "Use NVIDIA NVENC for faster rendering".to_string(),
+                },
+                SettingItem {
+                    name: "Background Opacity".to_string(),
+                    key: "bg_opacity".to_string(),
+                    value: config.shorts_config.background_opacity.to_string(),
+                    kind: SettingType::Float,
+                    description: "Opacity of background video (0.0 - 1.0)".to_string(),
+                },
+                SettingItem {
+                    name: "Main Video Zoom".to_string(),
+                    key: "zoom".to_string(),
+                    value: config.shorts_config.main_video_zoom.to_string(),
+                    kind: SettingType::Float,
+                    description: "Zoom level (0.5 = 50%, 1.0 = 100%)".to_string(),
+                },
+            ];
+        }
+    }
+
+    /// Apply edited setting back to config
+    pub fn apply_setting(&mut self) {
+        if let Some(config) = &mut self.config {
+            if self.settings_index < self.settings_items.len() {
+                let item = &self.settings_items[self.settings_index];
+                let val = &self.setting_input;
+
+                match item.key.as_str() {
+                    "output_dir" => config.default_output_dir = val.clone(),
+                    "auto_extract" => {
+                        config.extract_shorts_when_finished_moments = val.parse().unwrap_or(false)
+                    }
+                    "use_cookies" => config.use_cookies = val.parse().unwrap_or(false),
+                    "cookies_path" => config.cookies_path = val.clone(),
+                    "gpu" => config.gpu_acceleration = Some(val.parse().unwrap_or(false)),
+                    "bg_opacity" => {
+                        config.shorts_config.background_opacity = val.parse().unwrap_or(0.4)
+                    }
+                    "zoom" => config.shorts_config.main_video_zoom = val.parse().unwrap_or(0.7),
+                    _ => {}
+                }
+
+                // Try to save to disk immediately
+                let _ = config.save();
+
+                // Reload items to reflect changes
+                self.reload_settings_items();
+            }
         }
     }
 
@@ -169,7 +298,7 @@ impl App {
     /// Handle key events
     pub fn handle_key(&mut self, key: KeyCode) {
         match &self.screen {
-            AppScreen::UrlInput => match key {
+            AppScreen::ApiKeyInput => match key {
                 KeyCode::Enter => {
                     if !self.input.trim().is_empty() {
                         self.confirm_response = Some(true);
@@ -205,6 +334,133 @@ impl App {
                 }
                 _ => {}
             },
+            AppScreen::MainMenu => match key {
+                KeyCode::Up => {
+                    if self.menu_index > 0 {
+                        self.menu_index -= 1;
+                    } else {
+                        self.menu_index = 2; // Loop to bottom
+                    }
+                }
+                KeyCode::Down => {
+                    if self.menu_index < 2 {
+                        self.menu_index += 1;
+                    } else {
+                        self.menu_index = 0; // Loop to top
+                    }
+                }
+                KeyCode::Enter => {
+                    match self.menu_index {
+                        0 => {
+                            // Comenzar
+                            self.screen = AppScreen::UrlInput;
+                        }
+                        1 => {
+                            // Config
+                            self.reload_settings_items();
+                            self.settings_index = 0;
+                            self.screen = AppScreen::SettingsEditor;
+                        }
+                        2 => {
+                            // Salir
+                            self.should_quit = true;
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Esc => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            },
+            AppScreen::SettingsEditor => {
+                if self.editing_setting {
+                    match key {
+                        KeyCode::Enter => {
+                            self.apply_setting();
+                            self.editing_setting = false;
+                        }
+                        KeyCode::Esc => {
+                            self.editing_setting = false;
+                            self.setting_input.clear();
+                        }
+                        KeyCode::Char(c) => {
+                            self.setting_input.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            self.setting_input.pop();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key {
+                        KeyCode::Up => {
+                            if self.settings_index > 0 {
+                                self.settings_index -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            if self.settings_index < self.settings_items.len() - 1 {
+                                self.settings_index += 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let item = &self.settings_items[self.settings_index];
+                            if let SettingType::Bool = item.kind {
+                                // Toggle bool immediately
+                                let current = item.value.parse().unwrap_or(false);
+                                self.setting_input = (!current).to_string();
+                                self.apply_setting();
+                            } else {
+                                // Edit mode
+                                self.setting_input = item.value.clone();
+                                self.editing_setting = true;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            self.screen = AppScreen::MainMenu;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            AppScreen::UrlInput => match key {
+                KeyCode::Enter => {
+                    if !self.input.trim().is_empty() {
+                        self.confirm_response = Some(true);
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor_pos, c);
+                    self.cursor_pos += 1;
+                }
+                KeyCode::Backspace => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.input.len() {
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Left => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if self.cursor_pos < self.input.len() {
+                        self.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Esc => {
+                    // Go back to menu instead of quit?
+                    self.screen = AppScreen::MainMenu;
+                }
+                _ => {}
+            },
             AppScreen::ResumePrompt(_)
             | AppScreen::FormatConfirm
             | AppScreen::ShortsConfirm(_)
@@ -216,19 +472,22 @@ impl App {
                     self.confirm_response = Some(false);
                 }
                 KeyCode::Esc => {
-                    self.should_quit = true;
+                    // Back to Main Menu
+                    self.screen = AppScreen::MainMenu;
                 }
                 _ => {}
             },
             AppScreen::Processing => match key {
                 KeyCode::Char('q') | KeyCode::Esc => {
-                    self.should_quit = true;
+                    self.screen = AppScreen::MainMenu;
                 }
                 _ => {}
             },
             AppScreen::Done => match key {
                 KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
-                    self.should_quit = true;
+                    // Return to main menu instead of quit
+                    self.screen = AppScreen::MainMenu;
+                    // self.should_quit = true;
                 }
                 _ => {}
             },
@@ -375,13 +634,192 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 fn render_content(frame: &mut Frame, app: &App, area: Rect) {
     match &app.screen {
         AppScreen::Setup => render_setup(frame, app, area),
+        AppScreen::ApiKeyInput => render_apikey_input(frame, app, area),
+        AppScreen::MainMenu => render_main_menu(frame, app, area),
+        AppScreen::SettingsEditor => render_settings_editor(frame, app, area),
         AppScreen::ResumePrompt(url) => render_resume_prompt(frame, url, area),
         AppScreen::UrlInput => render_url_input(frame, app, area),
         AppScreen::FormatConfirm => render_format_confirm(frame, area),
         AppScreen::Processing => render_processing(frame, app, area),
         AppScreen::ShortsConfirm(count) => render_shorts_confirm(frame, *count, area),
         AppScreen::GpuDetectionPrompt => render_gpu_prompt(frame, area),
-        AppScreen::Done => render_processing(frame, app, area),
+        AppScreen::Done => render_done(frame, app, area),
+    }
+}
+
+fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" 🔑 Google Gemini API Key Required ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let input_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // Instructions
+            Constraint::Length(3), // Input
+            Constraint::Min(0),    // Note
+        ])
+        .split(inner);
+
+    // Instructions
+    let instructions = Paragraph::new(
+        "Welcome! It looks like this is your first time running AutoShorts.\nPlease enter your Google Gemini API Key to continue.",
+    )
+    .style(Style::default().fg(Color::White))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(instructions, input_layout[0]);
+
+    // Input field
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    // Mask input for API key? Usually good practice, but user might want to check it.
+    // Let's show it for now as it helps debugging typos.
+    let input_text = Paragraph::new(app.input.as_str())
+        .block(input_block)
+        .style(Style::default().fg(Color::Yellow));
+
+    frame.render_widget(input_text, input_layout[1]);
+
+    // Note
+    let note = Paragraph::new(
+        "To get an API Key, visit https://aistudio.google.com/app/apikey\nPress Enter to save.",
+    )
+    .style(Style::default().fg(Color::Gray));
+    frame.render_widget(note, input_layout[2]);
+
+    // Set cursor position
+    frame.set_cursor_position((
+        input_layout[1].x + 1 + app.cursor_pos as u16,
+        input_layout[1].y + 1,
+    ));
+}
+
+fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Menu Principal ");
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let options = vec!["Comenzar", "Configuracion", "Salir"];
+
+    let list_area = Rect {
+        x: area.width / 2 - 15,
+        y: area.height / 2 - 4,
+        width: 30,
+        height: 10,
+    };
+
+    // Ensure we don't go out of bounds if terminal is small
+    let list_area = list_area.intersection(inner_area);
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, &text)| {
+            let style = if i == app.menu_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            // Center text in item
+            let content = format!(" {:^26} ", text);
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Seleccione una opcion "),
+    );
+
+    frame.render_widget(list, list_area);
+}
+
+fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" Configuracion ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(10),   // List
+            Constraint::Length(3), // Help/Edit area
+        ])
+        .split(inner);
+
+    // Render list
+    let items: Vec<ListItem> = app
+        .settings_items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let is_selected = i == app.settings_index;
+
+            let val_color = if is_selected {
+                Color::Yellow
+            } else {
+                Color::White
+            };
+            let key_color = if is_selected {
+                Color::Cyan
+            } else {
+                Color::Gray
+            };
+
+            let prefix = if is_selected { "> " } else { "  " };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(val_color)),
+                Span::styled(
+                    format!("{:<20}: ", item.name),
+                    Style::default().fg(key_color),
+                ),
+                Span::styled(&item.value, Style::default().fg(val_color)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(Color::DarkGray))
+        .block(Block::default().borders(Borders::NONE));
+
+    frame.render_widget(list, layout[0]);
+
+    // Render help or edit box
+    if app.editing_setting {
+        let edit_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green))
+            .title(" Editing Value ");
+
+        let input = Paragraph::new(app.setting_input.as_str())
+            .block(edit_block)
+            .style(Style::default().fg(Color::Yellow));
+
+        frame.render_widget(input, layout[1]);
+    } else if app.settings_index < app.settings_items.len() {
+        let help_text = &app.settings_items[app.settings_index].description;
+        let help =
+            Paragraph::new(format!("ℹ️ {}", help_text)).style(Style::default().fg(Color::Gray));
+        frame.render_widget(help, layout[1]);
     }
 }
 
@@ -673,7 +1111,7 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("Press any key to exit..."));
+    lines.push(Line::from("Press Enter or Q to return to Menu..."));
 
     let paragraph = Paragraph::new(Text::from(lines)).block(block);
     frame.render_widget(paragraph, area);
@@ -682,13 +1120,21 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the footer with keyboard shortcuts
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let shortcuts = match &app.screen {
-        AppScreen::UrlInput => "Enter: Submit | Esc: Quit",
+        AppScreen::MainMenu => "Arrows: Navigate | Enter: Select | Esc: Exit",
+        AppScreen::SettingsEditor => {
+            if app.editing_setting {
+                "Enter: Save | Esc: Cancel Log"
+            } else {
+                "Arrows: Navigate | Enter: Edit | Esc: Back"
+            }
+        }
+        AppScreen::UrlInput => "Enter: Submit | Esc: Back",
         AppScreen::ResumePrompt(_)
         | AppScreen::FormatConfirm
         | AppScreen::ShortsConfirm(_)
-        | AppScreen::GpuDetectionPrompt => "Y: Yes | N: No | Esc: Quit",
+        | AppScreen::GpuDetectionPrompt => "Y: Yes | N: No | Esc: Menu",
         AppScreen::Processing => "Q/Esc: Quit",
-        AppScreen::Done => "Press any key to exit",
+        AppScreen::Done => "Enter/Q: Menu",
         _ => "Esc: Quit",
     };
 

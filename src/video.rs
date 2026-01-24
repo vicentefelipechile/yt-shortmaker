@@ -115,7 +115,6 @@ pub fn list_formats(url: &str, use_cookies: bool, cookies_path: &str) -> Result<
 }
 
 /// Download low resolution video for analysis (silent mode)
-/// Download low resolution video for analysis (silent mode)
 pub async fn download_low_res(
     url: &str,
     output_path: &str,

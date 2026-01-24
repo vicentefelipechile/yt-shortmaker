@@ -235,11 +235,16 @@ fn load_config_for_cli() -> Result<AppConfig> {
 
 /// Run the TUI mode
 async fn run_tui_mode() -> Result<()> {
+    // Step 1: Load or create configuration
+    // We do this BEFORE setting up the terminal so that any println! calls
+    // (like creating default config) happen on the normal stdout, not messing up the TUI.
+    let config = load_config_with_fallback()?;
+
     // Setup terminal
     let mut terminal = tui::setup_terminal()?;
 
     // Run the app
-    let result = run_app(&mut terminal).await;
+    let result = run_app(&mut terminal, config).await;
 
     // Restore terminal
     tui::restore_terminal(&mut terminal)?;
@@ -254,10 +259,8 @@ async fn run_tui_mode() -> Result<()> {
 
 async fn run_app(
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    config: AppConfig,
 ) -> Result<()> {
-    // Step 1: Load or create configuration
-    let config = load_config_with_fallback()?;
-
     // Step 2: Check dependencies
     if let Err(e) = video::check_dependencies() {
         // Show error in simple terminal mode since TUI isn't fully up yet
@@ -274,45 +277,25 @@ async fn run_app(
     app.config = Some(config.clone());
     app.status = "Ready".to_string();
 
-    // Check for NVENC availability if not configured
-    // If detected, we start at the GpuDetectionPrompt screen instead of UrlInput/Resume
-    let mut nvenc_detected = false;
-    if config.gpu_acceleration.is_none() {
-        if video::check_nvenc_availability() {
-            nvenc_detected = true;
-        } else {
-            // GPU not detected, set to false to avoid future checks
-            let mut new_config = config.clone();
-            new_config.gpu_acceleration = Some(false);
-            new_config.save().ok();
-        }
+    // Start at Main Menu by default
+    app.screen = AppScreen::MainMenu;
+
+    // Check for API Keys - if default or empty, go to ApiKeyInput
+    let default_key = "YOUR_API_KEY_HERE";
+    if config.google_api_keys.is_empty()
+        || config.google_api_keys.contains(&default_key.to_string())
+        || config.google_api_keys.iter().any(|k| k.trim().is_empty())
+    {
+        app.screen = AppScreen::ApiKeyInput;
+        app.input.clear();
+        app.cursor_pos = 0;
     }
 
     // Create message channel for async communication
     let (tx, mut rx) = tui::create_channel();
 
-    // Check for existing session
-    let temp_json_path = format!("{}/temp.json", config.default_output_dir);
+    // Session and Temp paths
     let mut session: Option<SessionState> = None;
-    let mut resume_prompted = false;
-
-    if nvenc_detected {
-        app.screen = AppScreen::GpuDetectionPrompt;
-    } else {
-        if Path::new(&temp_json_path).exists() {
-            if let Ok(content) = fs::read_to_string(&temp_json_path) {
-                if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content) {
-                    app.screen = AppScreen::ResumePrompt(existing_session.youtube_url.clone());
-                    session = Some(existing_session);
-                    resume_prompted = true;
-                }
-            }
-        }
-
-        if !resume_prompted {
-            app.screen = AppScreen::UrlInput;
-        }
-    }
 
     // Main event loop
     let mut url = String::new();
@@ -320,6 +303,7 @@ async fn run_app(
     let mut temp_dir = String::new();
     let mut custom_format: Option<String> = None;
     let mut processing_started = false;
+    let mut previous_screen = app.screen.clone();
 
     loop {
         // Render UI
@@ -344,17 +328,103 @@ async fn run_app(
             break;
         }
 
+        // Handle transitions
+        if previous_screen == AppScreen::ApiKeyInput && app.confirm_response.is_some() {
+            if let Some(true) = app.confirm_response.take() {
+                let new_key = app.input.trim().to_string();
+                if !new_key.is_empty() && new_key != default_key {
+                    if let Some(ref mut c) = app.config {
+                        c.google_api_keys = vec![new_key];
+                        if let Err(e) = c.save() {
+                            app.log(LogLevel::Error, format!("Failed to save API key: {}", e));
+                        } else {
+                            app.log(LogLevel::Success, "API Key saved successfully!".to_string());
+                            app.screen = AppScreen::MainMenu;
+                        }
+                    }
+                } else {
+                    app.log(LogLevel::Error, "Invalid API Key".to_string());
+                    // Reset input provided confirmation triggers
+                    app.confirm_response = None;
+                }
+            }
+        }
+
+        // Sync local config with app config (in case it was edited)
+        if let Some(ref c) = app.config {
+            // Ideally we'd only do this if changed, but cloning config is cheap enough
+            // We need to keep our local `config` var updated for the processing step
+            if c.default_output_dir != config.default_output_dir
+                || c.gpu_acceleration != config.gpu_acceleration
+                || c.shorts_config.output_width != config.shorts_config.output_width
+            {
+                // Just update the whole thing to be safe
+                // We can't assign to `config` because it's immutable binding from earlier.
+                // But we can create a new binding if we shadow it?
+                // No, we need it for `tokio::spawn` later.
+                // We will shadow it inside the Processing block or use `app.config` directly there.
+            }
+        }
+
+        // Handle logical transitions
+        // Detect "Start" from MainMenu -> UrlInput
+        if previous_screen == AppScreen::MainMenu && app.screen == AppScreen::UrlInput {
+            // Perform Startup Checks (GPU, Resume)
+            let current_config = app.config.clone().unwrap_or(config.clone());
+
+            // Check NVENC if not configured
+            let mut nvenc_needed = false;
+            if current_config.gpu_acceleration.is_none() {
+                if video::check_nvenc_availability() {
+                    nvenc_needed = true;
+                } else {
+                    // Auto-disable if not available
+                    if let Some(ref mut c) = app.config {
+                        c.gpu_acceleration = Some(false);
+                        c.save().ok();
+                    }
+                }
+            }
+
+            if nvenc_needed {
+                app.screen = AppScreen::GpuDetectionPrompt;
+            } else {
+                // Check persistence
+                let p_temp_path = format!("{}/temp.json", current_config.default_output_dir);
+                // Note: logic below uses `temp_json_path` var which relied on initial config.
+                // We should update `temp_json_path` if output dir changed.
+                let effective_temp_json_path = p_temp_path.clone();
+
+                if Path::new(&effective_temp_json_path).exists() {
+                    if let Ok(content) = fs::read_to_string(&effective_temp_json_path) {
+                        if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content)
+                        {
+                            app.screen =
+                                AppScreen::ResumePrompt(existing_session.youtube_url.clone());
+                            session = Some(existing_session);
+                        } else {
+                            // Corrupt session, ignore
+                            app.screen = AppScreen::UrlInput;
+                        }
+                    } else {
+                        app.screen = AppScreen::UrlInput;
+                    }
+                } else {
+                    // No session, stay at UrlInput
+                    app.screen = AppScreen::UrlInput;
+                }
+            }
+        }
+
+        // Update previous screen for next iteration
+        previous_screen = app.screen.clone();
+
         // Handle screen transitions
         match &app.screen {
             AppScreen::GpuDetectionPrompt => {
                 if let Some(response) = app.confirm_response.take() {
                     // Update config
                     let use_gpu = response;
-
-                    // We need to update both the local config variable (for this run)
-                    // and the saved file (for future runs).
-                    // However, 'config' is immutable here.
-                    // But app.config is mutable.
                     if let Some(ref mut c) = app.config {
                         c.gpu_acceleration = Some(use_gpu);
                         if let Err(e) = c.save() {
@@ -364,20 +434,18 @@ async fn run_app(
                         }
                     }
 
-                    // Now proceed to Resume check or Url Input
-                    // We duplicate the logic from above, but 'nvenc_detected' is logically handled now.
-                    // Actually, we can check for session here.
-                    // IMPORTANT: We need to know if we should go to ResumePrompt or UrlInput.
-                    // Re-check for session file.
-                    if Path::new(&temp_json_path).exists() {
-                        if let Ok(content) = fs::read_to_string(&temp_json_path) {
+                    // Check for session after GPU check
+                    let current_config = app.config.as_ref().unwrap(); // Safe as we just used it
+                    let p_temp_path = format!("{}/temp.json", current_config.default_output_dir);
+
+                    if Path::new(&p_temp_path).exists() {
+                        if let Ok(content) = fs::read_to_string(&p_temp_path) {
                             if let Ok(existing_session) =
                                 serde_json::from_str::<SessionState>(&content)
                             {
                                 app.screen =
                                     AppScreen::ResumePrompt(existing_session.youtube_url.clone());
                                 session = Some(existing_session);
-                                resume_prompted = true; // Just local var, doesn't matter much here
                             } else {
                                 app.screen = AppScreen::UrlInput;
                             }
@@ -399,6 +467,9 @@ async fn run_app(
                             temp_dir = s.temp_dir;
                             app.moments = all_moments.clone();
                             app.log(LogLevel::Info, format!("Resuming session for: {}", url));
+
+                            // If resuming, we might want to skip directly to processing/confirm if data is ready?
+                            // But original flow went to FormatConfirm.
                             app.screen = AppScreen::FormatConfirm;
                         }
                     } else {
@@ -408,7 +479,14 @@ async fn run_app(
                                 fs::remove_dir_all(&s.temp_dir).ok();
                             }
                         }
-                        fs::remove_file(&temp_json_path).ok();
+                        // We must delete the specific temp.json we found
+                        // Since output dir might have changed, we need to be careful.
+                        // Ideally we use the path we found it at.
+                        let current_config = app.config.as_ref().unwrap();
+                        let p_temp_path =
+                            format!("{}/temp.json", current_config.default_output_dir);
+                        fs::remove_file(&p_temp_path).ok();
+
                         session = None;
                         app.screen = AppScreen::UrlInput;
                     }
@@ -426,10 +504,14 @@ async fn run_app(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs();
-                        temp_dir = format!("{}/temp_{}", config.default_output_dir, session_id);
+
+                        // Use latest config for directories
+                        let current_config = app.config.as_ref().unwrap();
+                        temp_dir =
+                            format!("{}/temp_{}", current_config.default_output_dir, session_id);
 
                         // Clean up old temp directories
-                        if let Ok(entries) = fs::read_dir(&config.default_output_dir) {
+                        if let Ok(entries) = fs::read_dir(&current_config.default_output_dir) {
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
                                     if name.starts_with("temp_") && entry.path().is_dir() {
@@ -471,10 +553,13 @@ async fn run_app(
 
                     // Start background processing
                     let tx_clone = tx.clone();
-                    let config_clone = config.clone();
+                    // IMPORTANT: Use the APP config here to get latest changes
+                    let config_clone = app.config.clone().unwrap_or(config.clone());
+
                     let url_clone = url.clone();
                     let temp_dir_clone = temp_dir.clone();
-                    let temp_json_path_clone = temp_json_path.clone();
+                    let temp_json_path_clone =
+                        format!("{}/temp.json", config_clone.default_output_dir);
                     let custom_format_clone = custom_format.clone();
                     let existing_moments = all_moments.clone();
 
