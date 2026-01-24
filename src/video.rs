@@ -51,6 +51,23 @@ pub fn check_dependencies() -> Result<()> {
     Ok(())
 }
 
+/// Check if NVENC (NVIDIA Hardware Encoding) is available
+pub fn check_nvenc_availability() -> bool {
+    // Run ffmpeg -encoders and look for h264_nvenc
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout.contains("h264_nvenc")
+    } else {
+        false
+    }
+}
+
 /// Get video duration in seconds using ffprobe
 pub fn get_video_duration(file_path: &str) -> Result<u64> {
     let output = Command::new("ffprobe")
@@ -280,24 +297,54 @@ pub async fn extract_clip(
     start_time: &str,
     end_time: &str,
     output_path: &str,
+    use_gpu: bool,
 ) -> Result<()> {
+    let mut args = vec![
+        "-i".to_string(),
+        source_path.to_string(),
+        "-ss".to_string(),
+        start_time.to_string(),
+        "-to".to_string(),
+        end_time.to_string(),
+    ];
+
+    if use_gpu {
+        // NVENC settings for high quality
+        args.extend_from_slice(&[
+            "-c:v".to_string(),
+            "h264_nvenc".to_string(),
+            "-preset".to_string(),
+            "p4".to_string(),  // Medium-Fast quality for NVENC
+            "-rc".to_string(), // Rate control
+            "vbr".to_string(),
+            "-cq".to_string(), // Constant quality roughly equivalent to CRF
+            "23".to_string(),
+            "-b:v".to_string(),
+            "0".to_string(), // Handled by cq
+        ]);
+    } else {
+        // CPU settings
+        args.extend_from_slice(&[
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(), // Added preset to match original extract_clip implicitly or explicit
+            "medium".to_string(),  // Default for libx264
+            "-crf".to_string(),    // Constant Rate Factor (Standard for x264)
+            "23".to_string(),
+        ]);
+    }
+
+    args.extend_from_slice(&[
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-strict".to_string(),
+        "experimental".to_string(), // For older aac encoders, often not needed but safe
+        "-y".to_string(),
+        output_path.to_string(),
+    ]);
+
     let output = Command::new("ffmpeg")
-        .args([
-            "-i",
-            source_path,
-            "-ss",
-            start_time,
-            "-to",
-            end_time,
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            "-strict",
-            "experimental",
-            "-y",
-            output_path,
-        ])
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .output()
