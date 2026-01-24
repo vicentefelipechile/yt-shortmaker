@@ -116,6 +116,8 @@ pub struct App {
     pub result_message: Option<String>,
     /// Config reference
     pub config: Option<AppConfig>,
+    /// Whether an error occurred during processing
+    pub has_error: bool,
 }
 
 impl App {
@@ -136,6 +138,7 @@ impl App {
             output_dir,
             result_message: None,
             config: None,
+            has_error: false,
         }
     }
 
@@ -253,7 +256,9 @@ impl App {
                 self.log(LogLevel::Success, msg);
             }
             AppMessage::Error(msg) => {
-                self.log(LogLevel::Error, msg);
+                self.log(LogLevel::Error, msg.clone());
+                self.has_error = true;
+                self.result_message = Some(msg);
             }
             AppMessage::RequestUrl => {
                 self.screen = AppScreen::UrlInput;
@@ -608,18 +613,28 @@ fn render_shorts_confirm(frame: &mut Frame, count: usize, area: Rect) {
 }
 
 fn render_done(frame: &mut Frame, app: &App, area: Rect) {
+    let (title, border_color) = if app.has_error {
+        (" ❌ Failed ", Color::Red)
+    } else {
+        (" ✅ Complete ", Color::Green)
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(" ✅ Complete ");
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+
+    let (msg, msg_color) = if app.has_error {
+        ("Process failed with errors.", Color::Red)
+    } else {
+        ("Process completed successfully!", Color::Green)
+    };
 
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "Process completed successfully!",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            msg,
+            Style::default().fg(msg_color).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -627,7 +642,11 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(ref msg) = app.result_message {
         lines.push(Line::from(Span::styled(
             msg,
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(if app.has_error {
+                Color::Red
+            } else {
+                Color::Yellow
+            }),
         )));
         lines.push(Line::from(""));
     }
