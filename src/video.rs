@@ -261,6 +261,9 @@ pub async fn split_video(
 
         let output = Command::new("ffmpeg")
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
                 "-i",
                 input_path,
                 "-ss",
@@ -304,6 +307,9 @@ pub async fn extract_clip(
     use_gpu: bool,
 ) -> Result<()> {
     let mut args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
         "-i".to_string(),
         source_path.to_string(),
         "-ss".to_string(),
