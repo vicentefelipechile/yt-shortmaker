@@ -273,12 +273,17 @@ pub async fn split_video(
                 &chunk_path,
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .output()
             .context("Failed to execute ffmpeg for splitting")?;
 
         if !output.status.success() {
-            return Err(anyhow!("ffmpeg failed to split chunk {}", i));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!(
+                "ffmpeg split failed for chunk {}: {}",
+                i,
+                stderr.trim()
+            ));
         }
 
         video_chunks.push(VideoChunk {
@@ -345,12 +350,13 @@ pub async fn extract_clip(
     let output = Command::new("ffmpeg")
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .context("Failed to execute ffmpeg for extraction")?;
 
     if !output.status.success() {
-        return Err(anyhow!("ffmpeg failed to extract clip"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("ffmpeg extraction failed: {}", stderr.trim()));
     }
 
     Ok(())
