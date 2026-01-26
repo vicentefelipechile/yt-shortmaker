@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check version
+        id: check
+        shell: bash
+        run: |
+          # Extract version from Cargo.toml
+          VERSION=$(grep "^version" Cargo.toml | head -n 1 | cut -d '"' -f 2)
+          echo "Detected version: $VERSION"
+          
+          # Check if version ends with .0 (Major or Minor release)
+          if [[ "$VERSION" == *".0" ]]; then
+            echo "Version $VERSION is a Major or Minor release."
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Version $VERSION is a Patch release. Skipping release."
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+  create-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: autoshorts-rust-cli.exe
+            asset_name: autoshorts-rust-cli-windows.exe
+          - os: ubuntu-latest
+            artifact_name: autoshorts-rust-cli
+            asset_name: autoshorts-rust-cli-linux
+    
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create Tag
+        id: tag_version
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+        continue-on-error: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      # Build dependencies (Linux specific)
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libx11-dev libasound2-dev libudev-dev
+        
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: Release v${{ needs.check-version.outputs.version }}
+          files: target/release/${{ matrix.artifact_name }}
+          generate_release_notes: true
