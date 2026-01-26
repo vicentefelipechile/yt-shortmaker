@@ -1,6 +1,6 @@
 [package]
 name = "autoshorts-rust-cli"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["AutoShorts Team"]
@@ -18,3 +18,6 @@ chrono = "0.4"
 [build-dependencies]
 winres = "0.1"
 image = "0.24"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

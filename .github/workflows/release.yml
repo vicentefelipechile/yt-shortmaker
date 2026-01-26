@@ -132,8 +132,24 @@ jobs:
           cd target/${{ matrix.target }}/release
           mv ${{ matrix.artifact_name }} ${{ matrix.asset_name }}
       
+      - name: Generate Release Notes
+        shell: bash
+        run: |
+          cat <<EOF > RELEASE_NOTES.md
+          ## System Compatibility
+          
+          | Filename | System | Description |
+          | :--- | :--- | :--- |
+          | \`autoshorts-windows-amd64.exe\` | **Windows 10/11** (64-bit) | Standard version for most modern PCs. |
+          | \`autoshorts-windows-i386.exe\` | **Windows 7/8/10** (32-bit) | For older or low-end computers. |
+          | \`autoshorts-windows-arm64.exe\` | **Windows ARM64** | For devices like Surface Pro X, Lenovo ThinkPad X13s (Snapdragon). |
+          | \`autoshorts-linux-amd64\` | **Linux** (64-bit) | Standard for servers and desktops (Ubuntu, Debian, Fedora, etc). |
+          | \`autoshorts-linux-arm64\` | **Linux ARM64** | For Raspberry Pi 4/5, AWS Graviton, or other ARM servers. |
+          EOF
+
       - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+          body_path: RELEASE_NOTES.md
