@@ -290,6 +290,14 @@ impl App {
 
     /// Add a log entry
     pub fn log(&mut self, level: LogLevel, message: String) {
+        // Also send to global logger
+        match level {
+            LogLevel::Info => log::info!("{}", message),
+            LogLevel::Success => log::info!("(SUCCESS) {}", message),
+            LogLevel::Warning => log::warn!("{}", message),
+            LogLevel::Error => log::error!("{}", message),
+        }
+
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         self.logs.push(LogEntry {
             level,

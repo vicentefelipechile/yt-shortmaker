@@ -6,6 +6,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::types::VideoChunk;
+use regex::Regex;
+
+/// Extract video ID from YouTube URL
+pub fn extract_video_id(url: &str) -> Option<String> {
+    let re = Regex::new(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*").ok()?;
+    re.captures(url).and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+}
 
 /// Check if required external dependencies are available
 pub fn check_dependencies() -> Result<()> {
@@ -139,6 +146,14 @@ pub async fn download_low_res(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("yt-dlp failed: {}", stderr.trim()));
+    }
+    
+    // Log output if debug is enabled (checked via log level)
+    if log::log_enabled!(log::Level::Debug) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!("yt-dlp stdout: {}", stdout);
+        log::debug!("yt-dlp stderr: {}", stderr);
     }
 
     Ok(())

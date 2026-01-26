@@ -13,19 +13,41 @@ use anyhow::{Context, Result};
 use config::AppConfig;
 use crossterm::event::{self, Event, KeyEventKind};
 use gemini::GeminiClient;
+use simplelog::{Config, LevelFilter, WriteLogger};
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::time::Duration;
 use tui::{App, AppMessage, AppScreen, LogLevel, TuiSender};
+
 use types::{SessionState, VideoMoment};
+use video::extract_video_id;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Check for CLI commands first
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 1 {
-        return handle_cli_command(&args).await;
+    // Check and strip --debug flag
+    let debug_mode = args.contains(&"--debug".to_string());
+    if debug_mode {
+        let _ = WriteLogger::init(
+            LevelFilter::Debug,
+            Config::default(),
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(true)
+                .open("debug.log")?,
+        );
+        log::info!("Starting AutoShorts-Rust-CLI with debug logging");
+        log::debug!("Raw Args: {:?}", args);
+    }
+
+    let actual_args: Vec<String> = args.iter().filter(|a| *a != "--debug").cloned().collect();
+
+    if actual_args.len() > 1 {
+        return handle_cli_command(&actual_args).await;
     }
 
     // No CLI commands, run TUI mode
@@ -509,28 +531,25 @@ async fn run_app(
                         url = input_url;
                         app.log(LogLevel::Success, format!("Valid URL: {}", url));
 
-                        // Create new session
-                        let session_id = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-
                         // Use latest config for directories
                         let current_config = app.config.as_ref().unwrap();
+
+                        // Use video ID for caching to allow fallback
+                        let video_id = extract_video_id(&url).unwrap_or_else(|| {
+                            // Fallback to timestamp if ID extraction fails (shouldn't happen with valid URL)
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                                .to_string()
+                        });
+
                         temp_dir =
-                            format!("{}/temp_{}", current_config.default_output_dir, session_id);
+                            format!("{}/cache_{}", current_config.default_output_dir, video_id);
 
-                        // Clean up old temp directories
-                        if let Ok(entries) = fs::read_dir(&current_config.default_output_dir) {
-                            for entry in entries.flatten() {
-                                if let Some(name) = entry.file_name().to_str() {
-                                    if name.starts_with("temp_") && entry.path().is_dir() {
-                                        fs::remove_dir_all(entry.path()).ok();
-                                    }
-                                }
-                            }
-                        }
+                        log::info!("Using temp directory: {}", temp_dir);
 
+                        // Do NOT remove directory if it exists, to allow cache reuse
                         fs::create_dir_all(&temp_dir)?;
                         all_moments.clear();
                         app.screen = AppScreen::FormatConfirm;
