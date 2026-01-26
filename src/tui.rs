@@ -38,11 +38,7 @@ pub enum AppMessage {
     Complete(String),
     /// Error occurred
     Error(String),
-    /// Request URL input
-    RequestUrl,
-    /// Request format selection confirmation
-    RequestFormatConfirm,
-    /// Request    /// Shorts generation confirmation
+    /// Shorts generation confirmation
     RequestShortsConfirm(usize),
     /// Processing finished, ready to exit
     Finished,
@@ -519,15 +515,7 @@ impl App {
                 self.has_error = true;
                 self.result_message = Some(msg);
             }
-            AppMessage::RequestUrl => {
-                self.screen = AppScreen::UrlInput;
-                self.input.clear();
-                self.cursor_pos = 0;
-            }
-            AppMessage::RequestFormatConfirm => {
-                self.screen = AppScreen::FormatConfirm;
-                self.confirm_response = None;
-            }
+
             AppMessage::RequestShortsConfirm(count) => {
                 self.screen = AppScreen::ShortsConfirm(count);
                 self.confirm_response = None;

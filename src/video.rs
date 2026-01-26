@@ -94,26 +94,6 @@ pub fn get_video_duration(file_path: &str) -> Result<u64> {
     Ok(duration as u64)
 }
 
-/// List available formats for a video
-pub fn list_formats(url: &str, use_cookies: bool, cookies_path: &str) -> Result<()> {
-    let mut args = vec!["-F"];
-    if use_cookies {
-        args.push("--cookies");
-        args.push(cookies_path);
-    }
-    args.push(url);
-
-    let status = Command::new("yt-dlp")
-        .args(&args)
-        .status() // We want to show output to user
-        .context("Failed to execute yt-dlp --list-formats")?;
-
-    if !status.success() {
-        return Err(anyhow!("Failed to list formats"));
-    }
-    Ok(())
-}
-
 /// Download low resolution video for analysis (silent mode)
 pub async fn download_low_res(
     url: &str,

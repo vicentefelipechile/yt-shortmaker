@@ -41,7 +41,7 @@ You will need a Google Gemini API Key to use the AI analysis features.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/yt-shortmaker.git
+git clone https://github.com/vicentefelipechile/yt-shortmaker.git
 cd yt-shortmaker
 
 # Build the project
