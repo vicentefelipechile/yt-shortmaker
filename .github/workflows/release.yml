@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check version
+        id: check
+        shell: bash
+        run: |
+          VERSION=$(grep "^version" Cargo.toml | head -n 1 | cut -d '"' -f 2)
+          echo "Detected version: $VERSION"
+          if [[ "$VERSION" == *".0" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+  create-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: autoshorts-rust-cli.exe
+            asset_name: autoshorts-windows-amd64.exe
+            use_cross: false
+          
+          # Windows x86 (32-bit)
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            artifact_name: autoshorts-rust-cli.exe
+            asset_name: autoshorts-windows-i386.exe
+            use_cross: false
+
+          # Windows ARM64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: autoshorts-rust-cli.exe
+            asset_name: autoshorts-windows-arm64.exe
+            use_cross: false
+
+          # Linux x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: autoshorts-rust-cli
+            asset_name: autoshorts-linux-amd64
+            use_cross: false # Standard runner is x64 linux, usually fine without cross, but we stick to consistent env. Check dependencies.
+            # Using standard cargo build for x64 linux to rely on apt-get storage in next steps.
+
+          # Linux ARM64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: autoshorts-rust-cli
+            asset_name: autoshorts-linux-arm64
+            use_cross: true
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Cross
+        if: matrix.use_cross
+        run: cargo install cross
+
+      # Linux dependencies (Only for non-cross linux builds or if we need them for cross to link against?)
+      # Cross uses docker images which might have basic libs, but for audio/x11 we might need custom images or static linking.
+      # For now, let's keep the basic apt-get for the non-cross linux build.
+      - name: Install Linux Dependencies (Host)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libx11-dev libasound2-dev libudev-dev
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" == "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Create Tag
+        # Only run this once, or let it race safely.
+        # Ideally only one job does this or we check existence.
+        # Simpler: Just try to tag, ignore failure.
+        run: |
+          git tag "v${{ needs.check-version.outputs.version }}"
+          git push origin "v${{ needs.check-version.outputs.version }}"
+        continue-on-error: true
+      
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: Release v${{ needs.check-version.outputs.version }}
+          files: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          # We map the file to the specific asset name using the 'files' syntax or by renaming
+          # The action supports 'files' as a glob or list. It doesn't rename automatically easily.
+          # Let's rename the file first to match asset_name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Rename and Upload
+        # Manual upload/rename handling since softprops files input takes literal paths
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv ${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+      
+      - name: Publish Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
