@@ -78,6 +78,12 @@ pub enum AppScreen {
     GpuDetectionPrompt,
     /// Completed
     Done,
+    /// API Key Manager List
+    ApiKeysManager,
+    /// Input for adding a new API Key
+    ApiKeyAddInput,
+    /// Rename API Key
+    ApiKeyRename,
 }
 
 /// Log entry
@@ -150,6 +156,10 @@ pub struct App {
     pub setting_input: String,
     /// List of editable settings
     pub settings_items: Vec<SettingItem>,
+
+    // -- API Key Manager State --
+    /// Index for API key list selection
+    pub api_keys_index: usize,
 }
 
 impl App {
@@ -176,6 +186,7 @@ impl App {
             editing_setting: false,
             setting_input: String::new(),
             settings_items: Vec::new(),
+            api_keys_index: 0,
         }
     }
 
@@ -330,16 +341,157 @@ impl App {
                 }
                 _ => {}
             },
+            AppScreen::ApiKeysManager => match key {
+                KeyCode::Up => {
+                    if self.api_keys_index > 0 {
+                        self.api_keys_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(config) = &self.config {
+                        if !config.google_api_keys.is_empty()
+                            && self.api_keys_index < config.google_api_keys.len() - 1
+                        {
+                            self.api_keys_index += 1;
+                        }
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.screen = AppScreen::ApiKeyAddInput;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    if let Some(config) = &self.config {
+                        if !config.google_api_keys.is_empty() {
+                            self.screen = AppScreen::ApiKeyRename;
+                            self.input = config.google_api_keys[self.api_keys_index].name.clone();
+                            self.cursor_pos = self.input.len();
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(config) = &mut self.config {
+                        if !config.google_api_keys.is_empty() {
+                            let enabled = &mut config.google_api_keys[self.api_keys_index].enabled;
+                            *enabled = !*enabled;
+                            let _ = config.save();
+                        }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if let Some(config) = &mut self.config {
+                        if !config.google_api_keys.is_empty() {
+                            config.google_api_keys.remove(self.api_keys_index);
+                            if self.api_keys_index > 0
+                                && self.api_keys_index >= config.google_api_keys.len()
+                            {
+                                self.api_keys_index -= 1;
+                            }
+                            let _ = config.save();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::MainMenu;
+                }
+                _ => {}
+            },
+            AppScreen::ApiKeyAddInput => match key {
+                KeyCode::Enter => {
+                    if !self.input.trim().is_empty() {
+                        if let Some(config) = &mut self.config {
+                            config.google_api_keys.push(crate::config::ApiKey {
+                                value: self.input.trim().to_string(),
+                                name: format!("Gemini Key {}", config.google_api_keys.len() + 1),
+                                enabled: true,
+                            });
+                            let _ = config.save();
+                            self.screen = AppScreen::ApiKeysManager;
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor_pos, c);
+                    self.cursor_pos += 1;
+                }
+                KeyCode::Backspace => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.input.len() {
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Left => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if self.cursor_pos < self.input.len() {
+                        self.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::ApiKeysManager;
+                }
+                _ => {}
+            },
+            AppScreen::ApiKeyRename => match key {
+                KeyCode::Enter => {
+                    if !self.input.trim().is_empty() {
+                        if let Some(config) = &mut self.config {
+                            config.google_api_keys[self.api_keys_index].name =
+                                self.input.trim().to_string();
+                            let _ = config.save();
+                            self.screen = AppScreen::ApiKeysManager;
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor_pos, c);
+                    self.cursor_pos += 1;
+                }
+                KeyCode::Backspace => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.input.len() {
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Left => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if self.cursor_pos < self.input.len() {
+                        self.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::ApiKeysManager;
+                }
+                _ => {}
+            },
             AppScreen::MainMenu => match key {
                 KeyCode::Up => {
                     if self.menu_index > 0 {
                         self.menu_index -= 1;
                     } else {
-                        self.menu_index = 2; // Loop to bottom
+                        self.menu_index = 3; // Loop to bottom
                     }
                 }
                 KeyCode::Down => {
-                    if self.menu_index < 2 {
+                    if self.menu_index < 3 {
                         self.menu_index += 1;
                     } else {
                         self.menu_index = 0; // Loop to top
@@ -358,6 +510,11 @@ impl App {
                             self.screen = AppScreen::SettingsEditor;
                         }
                         2 => {
+                            // API Keys
+                            self.screen = AppScreen::ApiKeysManager;
+                            self.api_keys_index = 0;
+                        }
+                        3 => {
                             // Salir
                             self.should_quit = true;
                         }
@@ -632,7 +789,143 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::ShortsConfirm(count) => render_shorts_confirm(frame, *count, area),
         AppScreen::GpuDetectionPrompt => render_gpu_prompt(frame, area),
         AppScreen::Done => render_done(frame, app, area),
+        AppScreen::ApiKeysManager => render_api_keys_manager(frame, app, area),
+        AppScreen::ApiKeyAddInput => render_api_key_add_input(frame, app, area),
+        AppScreen::ApiKeyRename => render_api_key_rename(frame, app, area),
     }
+}
+
+fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" API Keys Manager ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),    // List
+            Constraint::Length(3), // Instructions
+        ])
+        .split(inner);
+
+    if let Some(config) = &app.config {
+        let items: Vec<ListItem> = config
+            .google_api_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let is_selected = i == app.api_keys_index;
+                let bg_color = if is_selected {
+                    Color::DarkGray
+                } else {
+                    Color::Reset
+                };
+                let prefix = if is_selected { "> " } else { "  " };
+
+                let check = if key.enabled { "[x]" } else { "[ ]" };
+
+                // Mask the key: "AIza...1234"
+                let masked = if key.value.len() > 10 {
+                    format!(
+                        "{}...{}",
+                        &key.value[0..4],
+                        &key.value[key.value.len() - 4..]
+                    )
+                } else {
+                    "***".to_string()
+                };
+
+                let content = format!("{} {} {} ({})", prefix, check, key.name, masked);
+                let style = if key.enabled {
+                    Style::default().bg(bg_color)
+                } else {
+                    Style::default().bg(bg_color).fg(Color::Gray)
+                };
+                ListItem::new(content).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(Block::default().borders(Borders::NONE));
+        frame.render_widget(list, layout[0]);
+    }
+
+    let help = Paragraph::new("[A] Add   [R] Rename   [Space] Toggle   [D] Delete   [Esc] Back")
+        .style(Style::default().fg(Color::Gray))
+        .block(Block::default().borders(Borders::TOP));
+    frame.render_widget(help, layout[1]);
+}
+
+fn render_api_key_rename(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Rename API Key ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Spacer
+            Constraint::Length(3), // Input
+            Constraint::Min(1),    // Help
+        ])
+        .split(inner);
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White));
+
+    let input = Paragraph::new(app.input.as_str()).block(input_block);
+    frame.render_widget(input, layout[1]);
+
+    let help =
+        Paragraph::new("Enter new name for the key.\nPress [Enter] to save, [Esc] to cancel.")
+            .style(Style::default().fg(Color::Gray));
+    frame.render_widget(help, layout[2]);
+
+    // Cursor
+    frame.set_cursor_position((layout[1].x + 1 + app.cursor_pos as u16, layout[1].y + 1));
+}
+
+fn render_api_key_add_input(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Add New API Key ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Spacer
+            Constraint::Length(3), // Input
+            Constraint::Min(1),    // Help
+        ])
+        .split(inner);
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White));
+
+    let input = Paragraph::new(app.input.as_str()).block(input_block);
+    frame.render_widget(input, layout[1]);
+
+    let help = Paragraph::new(
+        "Paste your Google Gemini API Key here.\nPress [Enter] to save, [Esc] to cancel.",
+    )
+    .style(Style::default().fg(Color::Gray));
+    frame.render_widget(help, layout[2]);
+
+    // Cursor
+    frame.set_cursor_position((layout[1].x + 1 + app.cursor_pos as u16, layout[1].y + 1));
 }
 
 fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -697,13 +990,13 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = vec!["Comenzar", "Configuracion", "Salir"];
+    let options = vec!["Comenzar", "Configuracion", "Administrar Keys", "Salir"];
 
     let list_area = Rect {
         x: area.width / 2 - 15,
-        y: area.height / 2 - 4,
+        y: area.height / 2 - 5,
         width: 30,
-        height: 10,
+        height: 12,
     };
 
     // Ensure we don't go out of bounds if terminal is small

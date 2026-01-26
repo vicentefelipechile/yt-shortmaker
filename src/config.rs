@@ -97,12 +97,33 @@ impl Default for ShortsConfig {
     }
 }
 
+/// API Key configuration with name and status
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKey {
+    /// The actual API key string
+    pub value: String,
+    /// User-friendly name for identification
+    #[serde(default = "default_key_name")]
+    pub name: String,
+    /// Whether this key is enabled for use
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_key_name() -> String {
+    "Gemini Key".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Application configuration stored in settings.json
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
     /// Google Gemini API Keys (Rotated)
-    #[serde(default)]
-    pub google_api_keys: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_api_keys")]
+    pub google_api_keys: Vec<ApiKey>,
     /// Default output directory for generated shorts
     pub default_output_dir: String,
     /// Whether to automatically start extraction when moments are finished
@@ -154,7 +175,11 @@ impl AppConfig {
     /// Create a default configuration file
     pub fn create_default() -> Result<()> {
         let default_config = AppConfig {
-            google_api_keys: vec!["YOUR_API_KEY_HERE".to_string()],
+            google_api_keys: vec![ApiKey {
+                value: "YOUR_API_KEY_HERE".to_string(),
+                name: "Primary Key".to_string(),
+                enabled: true,
+            }],
             default_output_dir: "./output".to_string(),
             extract_shorts_when_finished_moments: false,
             use_cookies: false,
@@ -185,6 +210,33 @@ impl AppConfig {
     }
 }
 
+/// Custom deserializer to handle both Vec<String> (legacy) and Vec<ApiKey> (new)
+fn deserialize_api_keys<'de, D>(deserializer: D) -> Result<Vec<ApiKey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ApiKeysData {
+        New(Vec<ApiKey>),
+        Old(Vec<String>),
+    }
+
+    let data = ApiKeysData::deserialize(deserializer)?;
+    match data {
+        ApiKeysData::New(keys) => Ok(keys),
+        ApiKeysData::Old(strings) => Ok(strings
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| ApiKey {
+                value: s,
+                name: format!("Gemini Key {}", i + 1),
+                enabled: true,
+            })
+            .collect()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,7 +244,18 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = AppConfig {
-            google_api_keys: vec!["test-key-1".to_string(), "test-key-2".to_string()],
+            google_api_keys: vec![
+                ApiKey {
+                    value: "test-key-1".to_string(),
+                    name: "Key 1".to_string(),
+                    enabled: true,
+                },
+                ApiKey {
+                    value: "test-key-2".to_string(),
+                    name: "Key 2".to_string(),
+                    enabled: true,
+                },
+            ],
             default_output_dir: "./output".to_string(),
             extract_shorts_when_finished_moments: false,
             use_cookies: false,
@@ -202,7 +265,23 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.google_api_keys, config.google_api_keys);
+        assert_eq!(
+            parsed.google_api_keys[0].value,
+            config.google_api_keys[0].value
+        );
+    }
+
+    #[test]
+    fn test_legacy_api_keys_migration() {
+        let json = r#"{
+            "google_api_keys": ["legacy_key_1", "legacy_key_2"],
+            "default_output_dir": "./output"
+        }"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.google_api_keys.len(), 2);
+        assert_eq!(parsed.google_api_keys[0].value, "legacy_key_1");
+        assert_eq!(parsed.google_api_keys[0].name, "Gemini Key 1");
+        assert_eq!(parsed.google_api_keys[0].enabled, true);
     }
 
     #[test]

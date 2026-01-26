@@ -283,8 +283,14 @@ async fn run_app(
     // Check for API Keys - if default or empty, go to ApiKeyInput
     let default_key = "YOUR_API_KEY_HERE";
     if config.google_api_keys.is_empty()
-        || config.google_api_keys.contains(&default_key.to_string())
-        || config.google_api_keys.iter().any(|k| k.trim().is_empty())
+        || config
+            .google_api_keys
+            .iter()
+            .any(|k| k.value == default_key)
+        || config
+            .google_api_keys
+            .iter()
+            .any(|k| k.value.trim().is_empty())
     {
         app.screen = AppScreen::ApiKeyInput;
         app.input.clear();
@@ -334,7 +340,11 @@ async fn run_app(
                 let new_key = app.input.trim().to_string();
                 if !new_key.is_empty() && new_key != default_key {
                     if let Some(ref mut c) = app.config {
-                        c.google_api_keys = vec![new_key];
+                        c.google_api_keys = vec![config::ApiKey {
+                            value: new_key,
+                            name: "Primary Key".to_string(),
+                            enabled: true,
+                        }];
                         if let Err(e) = c.save() {
                             app.log(LogLevel::Error, format!("Failed to save API key: {}", e));
                         } else {
@@ -786,50 +796,62 @@ async fn run_processing(
     ));
 
     // Analyze chunks with Gemini
-    if all_moments.is_empty() {
-        let _ = tx.send(AppMessage::Status(
-            "Analyzing with Gemini AI...".to_string(),
+    let _ = tx.send(AppMessage::Status(
+        "Analyzing with Gemini AI...".to_string(),
+    ));
+
+    let enabled_keys: Vec<String> = config
+        .google_api_keys
+        .iter()
+        .filter(|k| k.enabled)
+        .map(|k| k.value.clone())
+        .collect();
+
+    if enabled_keys.is_empty() {
+        let _ = tx.send(AppMessage::Error("No enabled API keys found!".to_string()));
+        let _ = tx.send(AppMessage::Finished);
+        return Ok((Vec::new(), None));
+    }
+
+    let gemini = GeminiClient::new(enabled_keys);
+
+    for (i, chunk) in video_chunks.iter().enumerate() {
+        let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
+        let _ = tx.send(AppMessage::Progress(
+            progress,
+            format!("Analyzing chunk {}/{}", i + 1, video_chunks.len()),
         ));
-        let gemini = GeminiClient::new(config.google_api_keys.clone());
+        let _ = tx.send(AppMessage::Status(format!(
+            "Analyzing chunk {}/{}...",
+            i + 1,
+            video_chunks.len()
+        )));
 
-        for (i, chunk) in video_chunks.iter().enumerate() {
-            let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
-            let _ = tx.send(AppMessage::Progress(
-                progress,
-                format!("Analyzing chunk {}/{}", i + 1, video_chunks.len()),
-            ));
-            let _ = tx.send(AppMessage::Status(format!(
-                "Analyzing chunk {}/{}...",
-                i + 1,
-                video_chunks.len()
-            )));
-
-            match gemini.upload_video(&chunk.file_path).await {
-                Ok(file_uri) => match gemini.analyze_video(&file_uri, chunk.start_seconds).await {
-                    Ok(moments) => {
-                        let _ = tx.send(AppMessage::Log(
-                            LogLevel::Info,
-                            format!("Chunk {}: Found {} moments", i + 1, moments.len()),
-                        ));
-                        for m in &moments {
-                            let _ = tx.send(AppMessage::MomentFound(m.clone()));
-                        }
-                        all_moments.extend(moments);
-                        save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
+        match gemini.upload_video(&chunk.file_path).await {
+            Ok(file_uri) => match gemini.analyze_video(&file_uri, chunk.start_seconds).await {
+                Ok(moments) => {
+                    let _ = tx.send(AppMessage::Log(
+                        LogLevel::Info,
+                        format!("Chunk {}: Found {} moments", i + 1, moments.len()),
+                    ));
+                    for m in &moments {
+                        let _ = tx.send(AppMessage::MomentFound(m.clone()));
                     }
-                    Err(e) => {
-                        let _ = tx.send(AppMessage::Log(
-                            LogLevel::Warning,
-                            format!("Chunk {} analysis failed: {}", i + 1, e),
-                        ));
-                    }
-                },
+                    all_moments.extend(moments);
+                    save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
+                }
                 Err(e) => {
                     let _ = tx.send(AppMessage::Log(
                         LogLevel::Warning,
-                        format!("Chunk {} upload failed: {}", i + 1, e),
+                        format!("Chunk {} analysis failed: {}", i + 1, e),
                     ));
                 }
+            },
+            Err(e) => {
+                let _ = tx.send(AppMessage::Log(
+                    LogLevel::Warning,
+                    format!("Chunk {} upload failed: {}", i + 1, e),
+                ));
             }
         }
     }
