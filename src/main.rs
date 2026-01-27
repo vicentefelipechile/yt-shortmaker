@@ -3,7 +3,7 @@
 //! using Google Gemini AI for intelligent content analysis.
 
 mod config;
-mod drive;
+
 mod gemini;
 mod security;
 mod setup;
@@ -477,60 +477,6 @@ async fn run_app(
         previous_screen = app.screen.clone();
 
         // Handle Drive Auth Request
-        if app.req_drive_auth {
-            app.req_drive_auth = false;
-            let tx_clone = tx.clone();
-            // Use current config to get tokens if any? No, we are authing.
-            let current_token_data = app.config.as_ref().and_then(|c| c.drive_token_data.clone());
-
-            tokio::spawn(async move {
-                // Ensure we start from clean state or existing?
-                // DriveManager::new takes Option<String>
-                // Logic:
-                // 1. Sync tokens to disk (if any)
-                let _ = drive::DriveManager::import_tokens(current_token_data.as_deref());
-
-                // 2. Create manager (which might read disk)
-                // Actually new(None) is fine if we imported to disk.
-                // But new(Some) tries to populate from string?
-                // Let's use new(None) and rely on disk since authenticate_with_disk uses disk.
-                match drive::DriveManager::new(None).await {
-                    Ok(mut drive) => {
-                        match drive.authenticate().await {
-                            Ok(_) => {
-                                // 3. Export tokens
-                                match drive::DriveManager::export_tokens() {
-                                    Ok(Some(tokens)) => {
-                                        let _ = tx_clone.send(AppMessage::DriveAuthSuccess(tokens));
-                                    }
-                                    Ok(None) => {
-                                        let _ = tx_clone.send(AppMessage::Error(
-                                            "Auth success but no tokens found".to_string(),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        let _ = tx_clone.send(AppMessage::Error(format!(
-                                            "Failed to export tokens: {}",
-                                            e
-                                        )));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = tx_clone.send(AppMessage::Error(format!(
-                                    "Authentication failed: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx_clone
-                            .send(AppMessage::Error(format!("Failed to init Drive: {}", e)));
-                    }
-                }
-            });
-        }
 
         // Handle screen transitions
         match &app.screen {
@@ -743,74 +689,6 @@ async fn run_app(
                                             "Shorts saved to: {}",
                                             dir
                                         )));
-
-                                        // Auto-Upload to Drive
-                                        if config_clone.drive_enabled
-                                            && config_clone.drive_auto_upload
-                                        {
-                                            let _ = tx_clone.send(AppMessage::Status(
-                                                "Uploading to Google Drive...".to_string(),
-                                            ));
-
-                                            // We need to run this in the same async block
-                                            // Ensure we pass the token data from config
-                                            match drive::DriveManager::new(
-                                                config_clone.drive_token_data.clone(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(drive) => {
-                                                    // List files in dir
-                                                    match std::fs::read_dir(&dir) {
-                                                        Ok(entries) => {
-                                                            let mut count = 0;
-                                                            for entry in entries.flatten() {
-                                                                let path = entry.path();
-                                                                if path
-                                                                    .extension()
-                                                                    .is_some_and(|ext| ext == "mp4")
-                                                                {
-                                                                    let _ = tx_clone.send(AppMessage::Progress(0.9, format!("Uploading {}...", path.file_name().unwrap_or_default().to_string_lossy())));
-                                                                    if let Err(e) = drive
-                                                                        .upload_file(
-                                                                            &path,
-                                                                            config_clone
-                                                                                .drive_folder_id
-                                                                                .as_deref(),
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        let _ = tx_clone.send(AppMessage::Error(format!("Upload failed: {}", e)));
-                                                                    } else {
-                                                                        count += 1;
-                                                                    }
-                                                                }
-                                                            }
-                                                            let _ = tx_clone.send(AppMessage::Log(
-                                                                LogLevel::Success,
-                                                                format!(
-                                                                    "Uploaded {} videos to Drive",
-                                                                    count
-                                                                ),
-                                                            ));
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx_clone.send(
-                                                                AppMessage::Error(format!(
-                                                                    "Failed to read shorts dir: {}",
-                                                                    e
-                                                                )),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx_clone.send(AppMessage::Error(
-                                                        format!("Drive Auth failed: {}", e),
-                                                    ));
-                                                }
-                                            }
-                                        }
                                     }
                                     let _ = tx_clone.send(AppMessage::Finished);
                                 }
@@ -853,10 +731,7 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     cookies_path: "./cookies.json".to_string(),
                     shorts_config: config::ShortsConfig::default(),
                     gpu_acceleration: None,
-                    drive_enabled: false,
-                    drive_auto_upload: false,
-                    drive_folder_id: None,
-                    drive_token_data: None,
+
                     active_encryption_mode: security::EncryptionMode::Password,
                     active_password: None,
                     language: "en".to_string(),

@@ -1,6 +1,6 @@
 [package]
 name = "yt-shortmaker"
-version = "1.10.6"
+version = "1.10.7"
 edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["vicentefelipechile"]
@@ -24,15 +24,12 @@ simplelog = "0.12"
 dirs = "5.0"
 notify-rust = "4"
 futures-util = "0.3"
-google-drive3 = "5.0"
-yup-oauth2 = "8.3"
 aes-gcm = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 base64 = "0.22"
 zeroize = "1.7"
-hyper = { version = "^0.14", features = ["full"] }
-hyper-rustls = "0.24"
+
 
 [build-dependencies]
 winres = "0.1"

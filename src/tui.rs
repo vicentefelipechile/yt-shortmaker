@@ -40,8 +40,7 @@ pub enum AppMessage {
     Error(String),
     /// Shorts generation confirmation
     RequestShortsConfirm(usize),
-    /// Google Drive Auth Success with tokens
-    DriveAuthSuccess(String),
+
     /// Processing finished, ready to exit
     Finished,
 }
@@ -90,12 +89,8 @@ pub enum AppScreen {
     SecuritySetup,
     /// Password Input (Startup)
     PasswordInput,
-    /// Google Drive Menu
-    GoogleDriveMenu,
     /// Language Selection Menu
     LanguageMenu,
-    /// Input for Google Drive Folder ID
-    DriveFolderInput,
 }
 
 /// Log entry
@@ -139,10 +134,6 @@ pub struct App {
     pub security_confirm_input: String, // For setting new password
     pub security_selected_mode: usize,  // 0: None, 1: Simple, 2: Password
     pub security_error: Option<String>,
-
-    // Drive Menu State
-    pub drive_selected_index: usize,
-    pub req_drive_auth: bool,
 
     // Active Security Context (for saving)
     pub active_security_mode: crate::security::EncryptionMode,
@@ -201,8 +192,7 @@ impl App {
             security_confirm_input: String::new(),
             security_selected_mode: 1, // Default to Simple (Recommended)
             security_error: None,
-            drive_selected_index: 0,
-            req_drive_auth: false,
+
             active_security_mode: crate::security::EncryptionMode::None,
             active_password: None,
             progress: 0.0,
@@ -658,164 +648,7 @@ impl App {
                 }
                 _ => {}
             },
-            AppScreen::DriveFolderInput => match key {
-                KeyCode::Enter => {
-                    if let Some(config) = &mut self.config {
-                        let val = self.input.trim();
-                        if val.is_empty() {
-                            config.drive_folder_id = None;
-                        } else {
-                            config.drive_folder_id = Some(val.to_string());
-                        }
-                        let _ = config.save();
-                        self.log(
-                            LogLevel::Success,
-                            rust_i18n::t!("msg_settings_saved").to_string(),
-                        );
-                    }
-                    self.screen = AppScreen::GoogleDriveMenu;
-                }
-                KeyCode::Char(c) => {
-                    self.input.insert(self.cursor_pos, c);
-                    self.cursor_pos += 1;
-                }
-                KeyCode::Backspace => {
-                    if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
-                        self.input.remove(self.cursor_pos);
-                    }
-                }
-                KeyCode::Delete => {
-                    if self.cursor_pos < self.input.len() {
-                        self.input.remove(self.cursor_pos);
-                    }
-                }
-                KeyCode::Left => {
-                    if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
-                    }
-                }
-                KeyCode::Right => {
-                    if self.cursor_pos < self.input.len() {
-                        self.cursor_pos += 1;
-                    }
-                }
-                KeyCode::Esc => {
-                    self.screen = AppScreen::GoogleDriveMenu;
-                }
-                _ => {}
-            },
-            AppScreen::GoogleDriveMenu => match key {
-                KeyCode::Up => {
-                    if self.drive_selected_index > 0 {
-                        self.drive_selected_index -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if self.drive_selected_index < 3 {
-                        self.drive_selected_index += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(config) = &mut self.config {
-                        match self.drive_selected_index {
-                            0 => {
-                                // Toggle Enable
-                                config.drive_enabled = !config.drive_enabled;
-                                let _ = config.save();
-                            }
-                            1 => {
-                                // Toggle Auto Upload
-                                config.drive_auto_upload = !config.drive_auto_upload;
-                                let _ = config.save();
-                            }
-                            2 => {
-                                // Login / Logout
-                                if config.drive_token_data.is_some() {
-                                    // Logout
-                                    config.drive_token_data = None;
-                                    let _ = config.save();
-                                    self.log(
-                                        LogLevel::Info,
-                                        "Logged out from Google Drive".to_string(),
-                                    );
-                                } else {
-                                    // Login
-                                    // We can't do async easily inside sync handle_key without spawning
-                                    // But we can trigger a state or just block?
-                                    // Blocking UI is bad but for this CLI it might be acceptable for auth
-                                    // or we spawn a prompt.
-                                    // Simpler: Just block, the browser opening is instant.
-                                    self.log(
-                                        LogLevel::Info,
-                                        "Starting authentication...".to_string(),
-                                    );
 
-                                    // We need to run async code here.
-                                    // We can use `tokio::task::block_in_place` or enter a runtime.
-                                    // Since main is tokio::main, we are effectively in a runtime.
-                                    // `handle_key` is not async.
-                                    // We should send a message to the main loop?
-                                    // But App handles keys itself.
-                                    //
-                                    // Quick fix: block_on just for this operation if we can?
-                                    // `tokio::runtime::Handle::current().block_on(...)` panics if called from async runtime thread.
-                                    // We are likely in an async context?
-                                    // `main.rs` calls `run_app`. `run_app` is likely async.
-                                    // Let's check `main.rs` later.
-                                    // For now, let's assume we can spawn a background task and wait or signal?
-                                    // Better: Set a flag or send a message.
-                                    // But `App` is the state.
-
-                                    // Let's try `std::thread::spawn` for the heavy lifting?
-                                    // But we need to update config.
-
-                                    // Solution: Mark a flag `authenticate_drive_requested = true` in App?
-                                    // No, let's look at `AppMessage`.
-                                    // We can implement `authenticate_drive` in `main.rs` and trigger it via channel if possible?
-                                    // But `App` has no channel sender here directly visible.
-
-                                    // Wait, `handle_key` takes `&mut self`.
-                                    // If we make `handle_key` return an Action enum?
-                                    // `run_app` likely calls `handle_key`.
-
-                                    // Let's modify `handle_key` logic later?
-                                    // Assume for now we just `log` instructions?
-                                    // No, user wants it to work.
-
-                                    // Let's use `futures::executor::block_on` on a new thread?
-                                    // "Can't start a runtime from within a runtime".
-
-                                    // Let's check `tui.rs` at the top import.  `tokio::sync::mpsc`.
-                                    // Maybe we can add a sender to `App` struct?
-
-                                    // Temporary hack: Just warn "Authentication not implemented yet" if I can't do it now?
-                                    // No, I must implement it.
-
-                                    // Let's assume we handle it in `main.rs`.
-                                    // We can return a special result from `handle_key`?
-                                    // `handle_key` return signature is `()`.
-
-                                    // I'll update `App` to have `req_drive_auth: bool`.
-                                    // And main loop checks it.
-                                    self.req_drive_auth = true;
-                                }
-                            }
-                            3 => {
-                                // Edit Folder ID
-                                self.screen = AppScreen::DriveFolderInput;
-                                self.input = config.drive_folder_id.clone().unwrap_or_default();
-                                self.cursor_pos = self.input.len();
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                KeyCode::Esc => {
-                    self.screen = AppScreen::MainMenu;
-                }
-                _ => {}
-            },
             AppScreen::LanguageMenu => match key {
                 KeyCode::Up => {
                     if self.language_index > 0 {
@@ -846,11 +679,11 @@ impl App {
                     if self.menu_index > 0 {
                         self.menu_index -= 1;
                     } else {
-                        self.menu_index = 6; // Loop to bottom
+                        self.menu_index = 5; // Loop to bottom
                     }
                 }
                 KeyCode::Down => {
-                    if self.menu_index < 6 {
+                    if self.menu_index < 5 {
                         self.menu_index += 1;
                     } else {
                         self.menu_index = 0; // Loop to top
@@ -871,11 +704,6 @@ impl App {
                             self.screen = AppScreen::SettingsEditor;
                         }
                         3 => {
-                            // Google Drive
-                            self.drive_selected_index = 0;
-                            self.screen = AppScreen::GoogleDriveMenu;
-                        }
-                        4 => {
                             // Security
                             // Initialize input state
                             if let Some(config) = &self.config {
@@ -890,12 +718,12 @@ impl App {
                             }
                             self.screen = AppScreen::SecuritySetup;
                         }
-                        5 => {
+                        4 => {
                             // API Keys
                             self.screen = AppScreen::ApiKeysManager;
                             self.api_keys_index = 0;
                         }
-                        6 => self.should_quit = true, // Exit
+                        5 => self.should_quit = true, // Exit
                         _ => {}
                     }
                 }
@@ -992,6 +820,7 @@ impl App {
                 }
                 _ => {}
             },
+
             AppScreen::ResumePrompt(_)
             | AppScreen::FormatConfirm
             | AppScreen::ShortsConfirm(_)
@@ -1047,6 +876,7 @@ impl App {
             }
             AppMessage::Error(msg) => {
                 self.log(LogLevel::Error, msg.clone());
+                self.status = "Error".to_string(); // Update status for visibility
                 self.has_error = true;
                 self.result_message = Some(msg);
             }
@@ -1055,18 +885,7 @@ impl App {
                 self.screen = AppScreen::ShortsConfirm(count);
                 self.confirm_response = None;
             }
-            AppMessage::DriveAuthSuccess(tokens) => {
-                if let Some(config) = &mut self.config {
-                    config.drive_token_data = Some(tokens);
-                    if let Err(e) = config.save() {
-                        self.log(LogLevel::Error, format!("Failed to save tokens: {}", e));
-                    } else {
-                        self.log(LogLevel::Success, "Google Drive Authenticated".to_string());
-                        // Refresh settings if needed?
-                    }
-                }
-                self.screen = AppScreen::GoogleDriveMenu;
-            }
+
             AppMessage::Finished => {
                 self.screen = AppScreen::Done;
             }
@@ -1184,58 +1003,8 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::ApiKeyRename => render_api_key_rename(frame, app, area),
         AppScreen::SecuritySetup => render_security_setup(frame, app, area),
         AppScreen::PasswordInput => render_password_input(frame, app, area),
-        AppScreen::GoogleDriveMenu => render_google_drive_menu(frame, app, area),
         AppScreen::LanguageMenu => render_language_menu(frame, app, area),
-        AppScreen::DriveFolderInput => render_drive_folder_input(frame, app, area),
     }
-}
-
-fn render_drive_folder_input(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Google Drive Folder ID ");
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Spacer
-            Constraint::Length(3), // Input
-            Constraint::Min(1),    // Help
-        ])
-        .split(inner);
-
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::White));
-
-    let input = Paragraph::new(app.input.as_str()).block(input_block);
-    frame.render_widget(input, layout[1]);
-
-    let help_text = vec![
-        Line::from("Enter the ID of the Google Drive folder where you want to save videos."),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("You can find this ID in the URL of the folder: "),
-            Span::styled(
-                "drive.google.com/drive/folders/YOUR_ID_Here",
-                Style::default().fg(Color::Blue),
-            ),
-        ]),
-        Line::from(""),
-        Line::from("Press [Enter] to save, [Esc] to cancel."),
-    ];
-
-    let help = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::Gray))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(help, layout[2]);
-
-    // Cursor
-    frame.set_cursor_position((layout[1].x + 1 + app.cursor_pos as u16, layout[1].y + 1));
 }
 
 fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
@@ -1434,11 +1203,10 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     // Dynamic localization for options
-    let options = vec![
+    let options = [
         rust_i18n::t!("menu_start"),
         rust_i18n::t!("language"),
         rust_i18n::t!("menu_settings"),
-        rust_i18n::t!("menu_drive"),
         rust_i18n::t!("menu_security"),
         rust_i18n::t!("menu_keys"),
         rust_i18n::t!("menu_exit"),
@@ -1457,7 +1225,7 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = options
         .iter()
         .enumerate()
-        .map(|(i, &ref text)| {
+        .map(|(i, text)| {
             let style = if i == app.menu_index {
                 Style::default()
                     .fg(Color::Black)
@@ -2032,96 +1800,6 @@ fn render_password_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(format!(" {} ", rust_i18n::t!("drive_title")));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Length(8),  // Info Box (IMPORTANT)
-                Constraint::Length(10), // Settings List
-                Constraint::Length(3),  // Actions
-            ]
-            .as_ref(),
-        )
-        .split(inner);
-
-    // Info Box
-    let info_text = rust_i18n::t!("drive_info_text");
-
-    let info = Paragraph::new(info_text)
-        .style(Style::default().fg(Color::White))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", rust_i18n::t!("drive_info_title")))
-                .border_style(Style::default().fg(Color::Yellow)),
-        );
-    frame.render_widget(info, layout[0]);
-
-    // Settings Items
-    // 0: Enable Drive [x]
-    // 1: Auto Upload [ ]
-    // 2: Folder ID: [.....]
-    // 3: Save & Return
-
-    let (drive_enabled, drive_auto, drive_folder) = if let Some(config) = &app.config {
-        (
-            config.drive_enabled,
-            config.drive_auto_upload,
-            config.drive_folder_id.clone(),
-        )
-    } else {
-        (false, false, None)
-    };
-
-    let enabled_str = if drive_enabled {
-        rust_i18n::t!("drive_enabled_yes")
-    } else {
-        rust_i18n::t!("drive_enabled_no")
-    };
-    let auto_str = if drive_auto {
-        rust_i18n::t!("drive_auto_yes")
-    } else {
-        rust_i18n::t!("drive_auto_no")
-    };
-    let folder_str = rust_i18n::t!("drive_folder_fmt", "id" => drive_folder.as_deref().unwrap_or(&rust_i18n::t!("drive_folder_root")));
-
-    let options = vec![
-        enabled_str,
-        auto_str,
-        folder_str,
-        rust_i18n::t!("drive_save"),
-    ];
-
-    let items: Vec<ListItem> = options
-        .iter()
-        .enumerate()
-        .map(|(i, &ref text)| {
-            let style = if i == app.drive_selected_index {
-                Style::default().fg(Color::Black).bg(Color::Green)
-            } else {
-                Style::default().fg(Color::Green)
-            };
-            ListItem::new(text.clone()).style(style)
-        })
-        .collect();
-
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", rust_i18n::t!("drive_config_title"))),
-    );
-    frame.render_widget(list, layout[1]);
-}
-
 fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2131,7 +1809,7 @@ fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = vec!["English", "Español"];
+    let options = ["English", "Español"];
 
     let list_area = Rect {
         x: area.width / 2 - 10,

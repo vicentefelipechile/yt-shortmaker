@@ -147,16 +147,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub gpu_acceleration: Option<bool>,
 
-    // --- Google Drive Integration ---
-    #[serde(default)]
-    pub drive_enabled: bool,
-    #[serde(default)]
-    pub drive_auto_upload: bool,
-    #[serde(default)]
-    pub drive_folder_id: Option<String>,
-    #[serde(default)]
-    pub drive_token_data: Option<String>,
-
     // Internal State for Security (Not saved to JSON body)
     #[serde(skip)]
     pub active_encryption_mode: EncryptionMode,
@@ -239,10 +229,7 @@ impl AppConfig {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
-            drive_enabled: false,
-            drive_auto_upload: false,
-            drive_folder_id: None,
-            drive_token_data: None,
+
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
         };
@@ -331,10 +318,7 @@ mod tests {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
-            drive_enabled: false,
-            drive_auto_upload: false,
-            drive_folder_id: None,
-            drive_token_data: None,
+
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
         };

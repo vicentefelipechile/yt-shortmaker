@@ -294,60 +294,41 @@ pub async fn split_video(
     Ok(video_chunks)
 }
 
-/// Extract a clip from source video (silent mode)
+/// Extract a clip from source video (fast mode using stream copy)
 pub async fn extract_clip(
     source_path: &str,
     start_time: &str,
     end_time: &str,
     output_path: &str,
-    use_gpu: bool,
+    _use_gpu: bool, // Parameter kept for API compatibility, but ignored for stream copy
 ) -> Result<()> {
-    let mut args = vec![
+    // Calculate duration for -t argument
+    let start_sec = parse_timestamp_to_seconds(start_time).context("Failed to parse start time")?;
+    let end_sec = parse_timestamp_to_seconds(end_time).context("Failed to parse end time")?;
+
+    if end_sec <= start_sec {
+        return Err(anyhow!("End time must be greater than start time"));
+    }
+
+    let duration = end_sec - start_sec;
+
+    let args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
+        "-ss".to_string(), // Fast seeking (before -i)
+        start_time.to_string(),
         "-i".to_string(),
         source_path.to_string(),
-        "-ss".to_string(),
-        start_time.to_string(),
-        "-to".to_string(),
-        end_time.to_string(),
-    ];
-
-    if use_gpu {
-        // NVENC settings for high quality
-        args.extend_from_slice(&[
-            "-c:v".to_string(),
-            "h264_nvenc".to_string(),
-            "-preset".to_string(),
-            "p4".to_string(),  // Medium-Fast quality for NVENC
-            "-rc".to_string(), // Rate control
-            "vbr".to_string(),
-            "-cq".to_string(), // Constant quality roughly equivalent to CRF
-            "23".to_string(),
-            "-b:v".to_string(),
-            "0".to_string(), // Handled by cq
-        ]);
-    } else {
-        // CPU settings
-        args.extend_from_slice(&[
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-preset".to_string(), // Added preset to match original extract_clip implicitly or explicit
-            "medium".to_string(),  // Default for libx264
-            "-crf".to_string(),    // Constant Rate Factor (Standard for x264)
-            "23".to_string(),
-        ]);
-    }
-
-    args.extend_from_slice(&[
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-strict".to_string(),
-        "experimental".to_string(), // For older aac encoders, often not needed but safe
-        "-y".to_string(),
+        "-t".to_string(), // Duration
+        duration.to_string(),
+        "-c".to_string(), // Stream copy (no re-encoding)
+        "copy".to_string(),
+        "-map".to_string(), // Copy all streams
+        "0".to_string(),
+        "-y".to_string(), // Overwrite output
         output_path.to_string(),
-    ]);
+    ];
 
     let output = Command::new("ffmpeg")
         .args(&args)
