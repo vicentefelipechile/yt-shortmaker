@@ -3328,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "yt-shortmaker"
-version = "1.9.1"
+version = "1.10.0"
 dependencies = [
  "anyhow",
  "chrono",
