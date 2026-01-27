@@ -323,9 +323,7 @@ impl GeminiClient {
                         },
                     },
                     PartRequest::Text {
-                        text: format!(
-                            "Analyze this video chunk and identify the best moments for YouTube Shorts. Return timestamps relative to the start of this provided video chunk (00:00:00).",
-                        ),
+                        text: "Analyze this video chunk and identify the best moments for YouTube Shorts. Return timestamps relative to the start of this provided video chunk (00:00:00).".to_string(),
                     },
                 ],
             }],

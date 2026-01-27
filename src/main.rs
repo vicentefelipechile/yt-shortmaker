@@ -35,7 +35,6 @@ async fn main() -> Result<()> {
             LevelFilter::Debug,
             Config::default(),
             OpenOptions::new()
-                .write(true)
                 .create(true)
                 .append(true)
                 .open("debug.log")?,
@@ -525,7 +524,7 @@ async fn run_app(
                 }
             }
             AppScreen::UrlInput => {
-                if let Some(_) = app.confirm_response.take() {
+                if app.confirm_response.take().is_some() {
                     let input_url = app.input.trim().to_string();
                     if video::validate_youtube_url(&input_url) {
                         url = input_url;

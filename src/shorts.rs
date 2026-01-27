@@ -282,7 +282,7 @@ pub fn generate_preview(
     output_image: &str,
     config: &ShortsConfig,
     timestamp_secs: f64,
-    use_gpu: bool,
+    _use_gpu: bool,
 ) -> Result<()> {
     if !Path::new(input_video).exists() {
         return Err(anyhow!("Input video not found: {}", input_video));
@@ -352,8 +352,6 @@ pub fn generate_preview(
     args.push("-frames:v".to_string());
     args.push("1".to_string());
 
-    if use_gpu {}
-
     args.push("-y".to_string());
     args.push(output_image.to_string());
 
@@ -372,13 +370,15 @@ pub fn generate_preview(
     Ok(())
 }
 
+pub type ProgressCallback = Box<dyn Fn(usize, usize, &str) + Send>;
+
 /// Transform all extracted clips in a directory to shorts format
 pub async fn transform_batch(
     input_dir: &str,
     output_dir: &str,
     config: &ShortsConfig,
     use_gpu: bool,
-    progress_callback: Option<Box<dyn Fn(usize, usize, &str) + Send>>,
+    progress_callback: Option<ProgressCallback>,
 ) -> Result<Vec<String>> {
     use std::fs;
 

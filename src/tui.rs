@@ -998,7 +998,7 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = vec!["Comenzar", "Configuracion", "Administrar Keys", "Salir"];
+    let options = &["Comenzar", "Configuracion", "Administrar Keys", "Salir"];
 
     let list_area = Rect {
         x: area.width / 2 - 15,
