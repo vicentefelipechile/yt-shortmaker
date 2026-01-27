@@ -1,4 +1,4 @@
-[![Release](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml/badge.svg)](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml)
+[![Release](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml/badge.svg)](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml) [![Rust Test](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/test.yml/badge.svg)](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/test.yml)
 
 # YT ShortMaker 🎬
 
