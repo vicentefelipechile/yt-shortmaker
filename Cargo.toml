@@ -1,15 +1,18 @@
 [package]
 name = "yt-shortmaker"
-version = "1.9.1"
+version = "1.10.0"
 edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["vicentefelipechile"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 anyhow = "1.0"
 ratatui = "0.29"
 crossterm = "0.28"
@@ -17,10 +20,13 @@ regex = "1"
 chrono = "0.4"
 log = "0.4"
 simplelog = "0.12"
+dirs = "5.0"
+notify-rust = "4"
+futures-util = "0.3"
 
 [build-dependencies]
 winres = "0.1"
 image = "0.24"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+zip = "0.6"

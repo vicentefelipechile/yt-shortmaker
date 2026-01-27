@@ -4,6 +4,7 @@
 
 mod config;
 mod gemini;
+mod setup;
 mod shorts;
 mod tui;
 mod types;
@@ -25,6 +26,9 @@ use video::extract_video_id;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Add local bin to PATH immediately
+    setup::add_to_process_path(&setup::get_bin_dir());
+
     // Check for CLI commands first
     let args: Vec<String> = std::env::args().collect();
 
@@ -50,6 +54,9 @@ async fn main() -> Result<()> {
     }
 
     // No CLI commands, run TUI mode
+    // Run setup wizard first
+    setup::run_setup_wizard().await?;
+
     run_tui_mode().await
 }
 
