@@ -40,6 +40,8 @@ pub enum AppMessage {
     Error(String),
     /// Shorts generation confirmation
     RequestShortsConfirm(usize),
+    /// Google Drive Auth Success with tokens
+    DriveAuthSuccess(String),
     /// Processing finished, ready to exit
     Finished,
 }
@@ -90,6 +92,10 @@ pub enum AppScreen {
     PasswordInput,
     /// Google Drive Menu
     GoogleDriveMenu,
+    /// Language Selection Menu
+    LanguageMenu,
+    /// Input for Google Drive Folder ID
+    DriveFolderInput,
 }
 
 /// Log entry
@@ -136,6 +142,7 @@ pub struct App {
 
     // Drive Menu State
     pub drive_selected_index: usize,
+    pub req_drive_auth: bool,
 
     // Active Security Context (for saving)
     pub active_security_mode: crate::security::EncryptionMode,
@@ -144,6 +151,8 @@ pub struct App {
     pub progress: f64,
     /// Progress label
     pub progress_label: String,
+    /// Selected language index (0: English, 1: Spanish)
+    pub language_index: usize,
     /// Found moments
     pub moments: Vec<VideoMoment>,
     /// User input buffer
@@ -186,13 +195,14 @@ impl App {
         Self {
             screen: AppScreen::Setup,
             start_time: Instant::now(),
-            status: "Initializing...".to_string(),
+            status: rust_i18n::t!("status_initializing").to_string(),
             logs: Vec::new(),
             security_password_input: String::new(),
             security_confirm_input: String::new(),
             security_selected_mode: 1, // Default to Simple (Recommended)
             security_error: None,
             drive_selected_index: 0,
+            req_drive_auth: false,
             active_security_mode: crate::security::EncryptionMode::None,
             active_password: None,
             progress: 0.0,
@@ -208,6 +218,7 @@ impl App {
             has_error: false,
             menu_index: 0,
             settings_index: 0,
+            language_index: 0,
             editing_setting: false,
             setting_input: String::new(),
             settings_items: Vec::new(),
@@ -224,49 +235,56 @@ impl App {
                     key: "output_dir".to_string(),
                     value: config.default_output_dir.clone(),
                     kind: SettingType::String,
-                    description: "Directory where shorts are saved".to_string(),
+                    description: rust_i18n::t!("desc_output_dir").to_string(),
+                },
+                SettingItem {
+                    name: "Output Directory".to_string(),
+                    key: "output_dir".to_string(),
+                    value: config.default_output_dir.clone(),
+                    kind: SettingType::String,
+                    description: rust_i18n::t!("desc_output_dir").to_string(),
                 },
                 SettingItem {
                     name: "Auto Extract".to_string(),
                     key: "auto_extract".to_string(),
                     value: config.extract_shorts_when_finished_moments.to_string(),
                     kind: SettingType::Bool,
-                    description: "Extract shorts automatically after analysis".to_string(),
+                    description: rust_i18n::t!("desc_auto_extract").to_string(),
                 },
                 SettingItem {
                     name: "Use Cookies".to_string(),
                     key: "use_cookies".to_string(),
                     value: config.use_cookies.to_string(),
                     kind: SettingType::Bool,
-                    description: "Use cookies for yt-dlp".to_string(),
+                    description: rust_i18n::t!("desc_use_cookies").to_string(),
                 },
                 SettingItem {
                     name: "Cookies Path".to_string(),
                     key: "cookies_path".to_string(),
                     value: config.cookies_path.clone(),
                     kind: SettingType::String,
-                    description: "Path to cookies.txt/json".to_string(),
+                    description: rust_i18n::t!("desc_cookies_path").to_string(),
                 },
                 SettingItem {
                     name: "GPU Acceleration".to_string(),
                     key: "gpu".to_string(),
                     value: config.gpu_acceleration.unwrap_or(false).to_string(),
                     kind: SettingType::Bool,
-                    description: "Use NVIDIA NVENC for faster rendering".to_string(),
+                    description: rust_i18n::t!("desc_gpu").to_string(),
                 },
                 SettingItem {
                     name: "Background Opacity".to_string(),
                     key: "bg_opacity".to_string(),
                     value: config.shorts_config.background_opacity.to_string(),
                     kind: SettingType::Float,
-                    description: "Opacity of background video (0.0 - 1.0)".to_string(),
+                    description: rust_i18n::t!("desc_bg_opacity").to_string(),
                 },
                 SettingItem {
                     name: "Main Video Zoom".to_string(),
                     key: "zoom".to_string(),
                     value: config.shorts_config.main_video_zoom.to_string(),
                     kind: SettingType::Float,
-                    description: "Zoom level (0.5 = 50%, 1.0 = 100%)".to_string(),
+                    description: rust_i18n::t!("desc_zoom").to_string(),
                 },
             ];
         }
@@ -342,6 +360,12 @@ impl App {
                 KeyCode::Enter => {
                     if !self.input.trim().is_empty() {
                         self.confirm_response = Some(true);
+                    } else {
+                        self.log(
+                            LogLevel::Error,
+                            rust_i18n::t!("msg_api_key_invalid").to_string(),
+                        );
+                        self.confirm_response = None;
                     }
                 }
                 KeyCode::Char(c) => {
@@ -439,8 +463,15 @@ impl App {
                                 name: format!("Gemini Key {}", config.google_api_keys.len() + 1),
                                 enabled: true,
                             });
-                            let _ = config.save();
-                            self.screen = AppScreen::ApiKeysManager;
+                            if let Err(e) = config.save() {
+                                self.log(LogLevel::Error, format!("Failed to save API key: {}", e));
+                            } else {
+                                self.log(
+                                    LogLevel::Success,
+                                    rust_i18n::t!("msg_api_key_saved").to_string(),
+                                );
+                                self.screen = AppScreen::ApiKeysManager;
+                            }
                         }
                     }
                 }
@@ -551,7 +582,8 @@ impl App {
 
                     if let crate::security::EncryptionMode::Password = mode {
                         if self.security_password_input.len() < 4 {
-                            self.security_error = Some("Password too short".to_string());
+                            self.security_error =
+                                Some(rust_i18n::t!("msg_password_too_short").to_string());
                             valid = false;
                         } else {
                             password_to_save = Some(self.security_password_input.clone());
@@ -564,7 +596,10 @@ impl App {
                             config.active_password = password_to_save.clone();
 
                             if let Err(e) = config.save() {
-                                self.security_error = Some(format!("Save failed: {}", e));
+                                self.security_error = Some(
+                                    rust_i18n::t!("msg_save_failed", "error" => e.to_string())
+                                        .to_string(),
+                                );
                             } else {
                                 self.active_security_mode = mode;
                                 self.active_password = password_to_save;
@@ -613,13 +648,60 @@ impl App {
                         }
                         Err(_) => {
                             self.security_error =
-                                Some("Incorrect password or invalid file".to_string());
+                                Some(rust_i18n::t!("msg_incorrect_password").to_string());
                             self.security_password_input.clear();
                         }
                     }
                 }
                 KeyCode::Esc => {
                     self.should_quit = true;
+                }
+                _ => {}
+            },
+            AppScreen::DriveFolderInput => match key {
+                KeyCode::Enter => {
+                    if let Some(config) = &mut self.config {
+                        let val = self.input.trim();
+                        if val.is_empty() {
+                            config.drive_folder_id = None;
+                        } else {
+                            config.drive_folder_id = Some(val.to_string());
+                        }
+                        let _ = config.save();
+                        self.log(
+                            LogLevel::Success,
+                            rust_i18n::t!("msg_settings_saved").to_string(),
+                        );
+                    }
+                    self.screen = AppScreen::GoogleDriveMenu;
+                }
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor_pos, c);
+                    self.cursor_pos += 1;
+                }
+                KeyCode::Backspace => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.input.len() {
+                        self.input.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Left => {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if self.cursor_pos < self.input.len() {
+                        self.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::GoogleDriveMenu;
                 }
                 _ => {}
             },
@@ -640,23 +722,119 @@ impl App {
                             0 => {
                                 // Toggle Enable
                                 config.drive_enabled = !config.drive_enabled;
+                                let _ = config.save();
                             }
                             1 => {
                                 // Toggle Auto Upload
                                 config.drive_auto_upload = !config.drive_auto_upload;
+                                let _ = config.save();
                             }
                             2 => {
-                                // Edit Folder ID (Placeholder for now, essentially toggle None vs Some("root"))
-                                // A proper input would be better, but for now reset to default or loop?
+                                // Login / Logout
+                                if config.drive_token_data.is_some() {
+                                    // Logout
+                                    config.drive_token_data = None;
+                                    let _ = config.save();
+                                    self.log(
+                                        LogLevel::Info,
+                                        "Logged out from Google Drive".to_string(),
+                                    );
+                                } else {
+                                    // Login
+                                    // We can't do async easily inside sync handle_key without spawning
+                                    // But we can trigger a state or just block?
+                                    // Blocking UI is bad but for this CLI it might be acceptable for auth
+                                    // or we spawn a prompt.
+                                    // Simpler: Just block, the browser opening is instant.
+                                    self.log(
+                                        LogLevel::Info,
+                                        "Starting authentication...".to_string(),
+                                    );
+
+                                    // We need to run async code here.
+                                    // We can use `tokio::task::block_in_place` or enter a runtime.
+                                    // Since main is tokio::main, we are effectively in a runtime.
+                                    // `handle_key` is not async.
+                                    // We should send a message to the main loop?
+                                    // But App handles keys itself.
+                                    //
+                                    // Quick fix: block_on just for this operation if we can?
+                                    // `tokio::runtime::Handle::current().block_on(...)` panics if called from async runtime thread.
+                                    // We are likely in an async context?
+                                    // `main.rs` calls `run_app`. `run_app` is likely async.
+                                    // Let's check `main.rs` later.
+                                    // For now, let's assume we can spawn a background task and wait or signal?
+                                    // Better: Set a flag or send a message.
+                                    // But `App` is the state.
+
+                                    // Let's try `std::thread::spawn` for the heavy lifting?
+                                    // But we need to update config.
+
+                                    // Solution: Mark a flag `authenticate_drive_requested = true` in App?
+                                    // No, let's look at `AppMessage`.
+                                    // We can implement `authenticate_drive` in `main.rs` and trigger it via channel if possible?
+                                    // But `App` has no channel sender here directly visible.
+
+                                    // Wait, `handle_key` takes `&mut self`.
+                                    // If we make `handle_key` return an Action enum?
+                                    // `run_app` likely calls `handle_key`.
+
+                                    // Let's modify `handle_key` logic later?
+                                    // Assume for now we just `log` instructions?
+                                    // No, user wants it to work.
+
+                                    // Let's use `futures::executor::block_on` on a new thread?
+                                    // "Can't start a runtime from within a runtime".
+
+                                    // Let's check `tui.rs` at the top import.  `tokio::sync::mpsc`.
+                                    // Maybe we can add a sender to `App` struct?
+
+                                    // Temporary hack: Just warn "Authentication not implemented yet" if I can't do it now?
+                                    // No, I must implement it.
+
+                                    // Let's assume we handle it in `main.rs`.
+                                    // We can return a special result from `handle_key`?
+                                    // `handle_key` return signature is `()`.
+
+                                    // I'll update `App` to have `req_drive_auth: bool`.
+                                    // And main loop checks it.
+                                    self.req_drive_auth = true;
+                                }
                             }
                             3 => {
-                                // Save and Return
-                                let _ = config.save(); // Config knows active mode
-                                self.screen = AppScreen::MainMenu;
+                                // Edit Folder ID
+                                self.screen = AppScreen::DriveFolderInput;
+                                self.input = config.drive_folder_id.clone().unwrap_or_default();
+                                self.cursor_pos = self.input.len();
                             }
                             _ => {}
                         }
                     }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::MainMenu;
+                }
+                _ => {}
+            },
+            AppScreen::LanguageMenu => match key {
+                KeyCode::Up => {
+                    if self.language_index > 0 {
+                        self.language_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.language_index < 1 {
+                        self.language_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let new_lang = if self.language_index == 0 { "en" } else { "es" };
+                    rust_i18n::set_locale(new_lang);
+                    if let Some(config) = &mut self.config {
+                        config.language = new_lang.to_string();
+                        let _ = config.save();
+                    }
+                    self.screen = AppScreen::MainMenu;
                 }
                 KeyCode::Esc => {
                     self.screen = AppScreen::MainMenu;
@@ -668,11 +846,11 @@ impl App {
                     if self.menu_index > 0 {
                         self.menu_index -= 1;
                     } else {
-                        self.menu_index = 5; // Loop to bottom
+                        self.menu_index = 6; // Loop to bottom
                     }
                 }
                 KeyCode::Down => {
-                    if self.menu_index < 5 {
+                    if self.menu_index < 6 {
                         self.menu_index += 1;
                     } else {
                         self.menu_index = 0; // Loop to top
@@ -682,16 +860,22 @@ impl App {
                     match self.menu_index {
                         0 => self.screen = AppScreen::UrlInput,
                         1 => {
+                            if let Some(config) = &self.config {
+                                self.language_index = if config.language == "es" { 1 } else { 0 };
+                            }
+                            self.screen = AppScreen::LanguageMenu;
+                        }
+                        2 => {
                             self.reload_settings_items();
                             self.settings_index = 0;
                             self.screen = AppScreen::SettingsEditor;
                         }
-                        2 => {
+                        3 => {
                             // Google Drive
                             self.drive_selected_index = 0;
                             self.screen = AppScreen::GoogleDriveMenu;
                         }
-                        3 => {
+                        4 => {
                             // Security
                             // Initialize input state
                             if let Some(config) = &self.config {
@@ -706,12 +890,12 @@ impl App {
                             }
                             self.screen = AppScreen::SecuritySetup;
                         }
-                        4 => {
+                        5 => {
                             // API Keys
                             self.screen = AppScreen::ApiKeysManager;
                             self.api_keys_index = 0;
                         }
-                        5 => self.should_quit = true, // Exit
+                        6 => self.should_quit = true, // Exit
                         _ => {}
                     }
                 }
@@ -871,6 +1055,18 @@ impl App {
                 self.screen = AppScreen::ShortsConfirm(count);
                 self.confirm_response = None;
             }
+            AppMessage::DriveAuthSuccess(tokens) => {
+                if let Some(config) = &mut self.config {
+                    config.drive_token_data = Some(tokens);
+                    if let Err(e) = config.save() {
+                        self.log(LogLevel::Error, format!("Failed to save tokens: {}", e));
+                    } else {
+                        self.log(LogLevel::Success, "Google Drive Authenticated".to_string());
+                        // Refresh settings if needed?
+                    }
+                }
+                self.screen = AppScreen::GoogleDriveMenu;
+            }
             AppMessage::Finished => {
                 self.screen = AppScreen::Done;
             }
@@ -942,11 +1138,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     // Left side: Output dir and status
     let left_text = Text::from(vec![
         Line::from(vec![
-            Span::raw("📁 Output: "),
+            Span::raw(format!("📁 {}", rust_i18n::t!("header_output"))),
             Span::styled(&app.output_dir, Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
-            Span::raw("⚡ Status: "),
+            Span::raw(format!("⚡ {}", rust_i18n::t!("header_status"))),
             Span::styled(&app.status, Style::default().fg(Color::Green)),
         ]),
     ]);
@@ -955,11 +1151,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     // Right side: Uptime and moments count
     let right_text = Text::from(vec![
         Line::from(vec![
-            Span::raw("⏱  Uptime: "),
+            Span::raw(format!("⏱  {}", rust_i18n::t!("header_uptime"))),
             Span::styled(app.uptime(), Style::default().fg(Color::Cyan)),
         ]),
         Line::from(vec![
-            Span::raw("🎬 Moments: "),
+            Span::raw(format!("🎬 {}", rust_i18n::t!("header_moments"))),
             Span::styled(
                 app.moments.len().to_string(),
                 Style::default().fg(Color::Green),
@@ -989,7 +1185,57 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::SecuritySetup => render_security_setup(frame, app, area),
         AppScreen::PasswordInput => render_password_input(frame, app, area),
         AppScreen::GoogleDriveMenu => render_google_drive_menu(frame, app, area),
+        AppScreen::LanguageMenu => render_language_menu(frame, app, area),
+        AppScreen::DriveFolderInput => render_drive_folder_input(frame, app, area),
     }
+}
+
+fn render_drive_folder_input(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Google Drive Folder ID ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Spacer
+            Constraint::Length(3), // Input
+            Constraint::Min(1),    // Help
+        ])
+        .split(inner);
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White));
+
+    let input = Paragraph::new(app.input.as_str()).block(input_block);
+    frame.render_widget(input, layout[1]);
+
+    let help_text = vec![
+        Line::from("Enter the ID of the Google Drive folder where you want to save videos."),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("You can find this ID in the URL of the folder: "),
+            Span::styled(
+                "drive.google.com/drive/folders/YOUR_ID_Here",
+                Style::default().fg(Color::Blue),
+            ),
+        ]),
+        Line::from(""),
+        Line::from("Press [Enter] to save, [Esc] to cancel."),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::Gray))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(help, layout[2]);
+
+    // Cursor
+    frame.set_cursor_position((layout[1].x + 1 + app.cursor_pos as u16, layout[1].y + 1));
 }
 
 fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
@@ -1182,25 +1428,27 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(" Menu Principal ");
+        .title(format!(" {} ", rust_i18n::t!("main_menu_title")));
 
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = &[
-        "Comenzar",
-        "Configuracion",
-        "Google Drive",
-        "Seguridad",
-        "Administrar Keys",
-        "Salir",
+    // Dynamic localization for options
+    let options = vec![
+        rust_i18n::t!("menu_start"),
+        rust_i18n::t!("language"),
+        rust_i18n::t!("menu_settings"),
+        rust_i18n::t!("menu_drive"),
+        rust_i18n::t!("menu_security"),
+        rust_i18n::t!("menu_keys"),
+        rust_i18n::t!("menu_exit"),
     ];
 
     let list_area = Rect {
         x: area.width / 2 - 15,
-        y: area.height / 2 - 5,
+        y: area.height / 2 - 7, // Adjusted for extra item
         width: 30,
-        height: 12,
+        height: 14, // Adjusted for extra item
     };
 
     // Ensure we don't go out of bounds if terminal is small
@@ -1209,7 +1457,7 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = options
         .iter()
         .enumerate()
-        .map(|(i, &text)| {
+        .map(|(i, &ref text)| {
             let style = if i == app.menu_index {
                 Style::default()
                     .fg(Color::Black)
@@ -1227,7 +1475,7 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Seleccione una opcion "),
+            .title(format!(" {} ", rust_i18n::t!("select_option"))),
     );
 
     frame.render_widget(list, list_area);
@@ -1312,19 +1560,22 @@ fn render_gpu_prompt(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
-        .title(" 🚀 Hardware Acceleration Detected ");
+        .title(format!(" 🚀 {} ", rust_i18n::t!("gpu_detected_title")));
 
     let text = Text::from(vec![
         Line::from(""),
-        Line::from("NVIDIA GPU detected!"),
+        Line::from(rust_i18n::t!("gpu_detected_msg")),
         Line::from(""),
-        Line::from("Do you want to use NVENC for faster video rendering?"),
+        Line::from(rust_i18n::t!("gpu_ask")),
         Line::from(""),
         Line::from(vec![
-            Span::raw("(Y)es - Use NVENC "),
-            Span::styled("(Recommended)", Style::default().fg(Color::Green)),
+            Span::raw(rust_i18n::t!("gpu_yes")),
+            Span::styled(
+                rust_i18n::t!("gpu_recommended"),
+                Style::default().fg(Color::Green),
+            ),
         ]),
-        Line::from("(N)o  - Use CPU encoding"),
+        Line::from(rust_i18n::t!("gpu_no")),
         Line::from(""),
     ]);
 
@@ -1348,16 +1599,16 @@ fn render_resume_prompt(frame: &mut Frame, url: &str, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" 📋 Previous Session Found ");
+        .title(format!(" 📋 {} ", rust_i18n::t!("resume_title")));
 
     let text = Text::from(vec![
         Line::from(""),
         Line::from(vec![
-            Span::raw("Found previous session for: "),
+            Span::raw(rust_i18n::t!("resume_found")),
             Span::styled(url, Style::default().fg(Color::Cyan)),
         ]),
         Line::from(""),
-        Line::from("Do you want to resume? (Y/n)").style(Style::default().fg(Color::Yellow)),
+        Line::from(rust_i18n::t!("resume_ask")).style(Style::default().fg(Color::Yellow)),
     ]);
 
     let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
@@ -1369,7 +1620,7 @@ fn render_url_input(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(" 🎬 Enter YouTube URL ");
+        .title(format!(" 🎬 {} ", rust_i18n::t!("url_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1384,8 +1635,8 @@ fn render_url_input(frame: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     // Instructions
-    let instructions = Paragraph::new("Enter a valid YouTube video URL and press Enter:")
-        .style(Style::default().fg(Color::Gray));
+    let instructions =
+        Paragraph::new(rust_i18n::t!("url_instr")).style(Style::default().fg(Color::Gray));
     frame.render_widget(instructions, input_layout[0]);
 
     // Input field
@@ -1605,28 +1856,28 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the footer with keyboard shortcuts
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let shortcuts = match &app.screen {
-        AppScreen::MainMenu => "Arrows: Navigate | Enter: Select | Esc: Exit",
+        AppScreen::MainMenu => rust_i18n::t!("shortcuts_main"),
         AppScreen::SettingsEditor => {
             if app.editing_setting {
-                "Enter: Save | Esc: Cancel Log"
+                rust_i18n::t!("shortcuts_settings_edit")
             } else {
-                "Arrows: Navigate | Enter: Edit | Esc: Back"
+                rust_i18n::t!("shortcuts_settings_nav")
             }
         }
-        AppScreen::UrlInput => "Enter: Submit | Esc: Back",
+        AppScreen::UrlInput => rust_i18n::t!("shortcuts_url"),
         AppScreen::ResumePrompt(_)
         | AppScreen::FormatConfirm
         | AppScreen::ShortsConfirm(_)
-        | AppScreen::GpuDetectionPrompt => "Y: Yes | N: No | Esc: Menu",
-        AppScreen::Processing => "Q/Esc: Quit",
-        AppScreen::Done => "Enter/Q: Menu",
-        _ => "Esc: Quit",
+        | AppScreen::GpuDetectionPrompt => rust_i18n::t!("shortcuts_confirm"),
+        AppScreen::Processing => rust_i18n::t!("shortcuts_process"),
+        AppScreen::Done => rust_i18n::t!("shortcuts_done"),
+        _ => rust_i18n::t!("shortcuts_default"),
     };
 
     let footer_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Keyboard Shortcuts ");
+        .title(format!(" {} ", rust_i18n::t!("shortcuts_footer_title")));
 
     let footer_text = Paragraph::new(shortcuts)
         .block(footer_block)
@@ -1648,7 +1899,7 @@ fn render_security_setup(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" Configuracion de Seguridad ");
+        .title(format!(" {} ", rust_i18n::t!("security_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1668,29 +1919,26 @@ fn render_security_setup(frame: &mut Frame, app: &App, area: Rect) {
         )
         .split(inner);
 
-    let intro_text = Paragraph::new(
-        "Se ha detectado una nueva configuracion o actualizacion importante.\n\
-         Seleccione como desea proteger sus datos sensibles (API Keys, Tokens):",
-    )
-    .alignment(Alignment::Center)
-    .wrap(Wrap { trim: true });
+    let intro_text = Paragraph::new(rust_i18n::t!("security_intro"))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
     frame.render_widget(intro_text, chunks[0]);
 
     let modes = [
-        "No aplicar seguridad",
-        "Encriptado Simple (Recomendado)",
-        "Contraseña Maestra",
+        rust_i18n::t!("security_mode_none"),
+        rust_i18n::t!("security_mode_simple"),
+        rust_i18n::t!("security_mode_pass"),
     ];
     let mode_descriptions = [
-        "Los datos se guardan en texto plano (settings.json).",
-        "Los datos se ofuscan. Protege contra lectura casual. No requiere contraseña.",
-        "Los datos se encriptan con AES-256. Requiere contraseña al iniciar la App.",
+        rust_i18n::t!("security_desc_none"),
+        rust_i18n::t!("security_desc_simple"),
+        rust_i18n::t!("security_desc_pass"),
     ];
 
     let items: Vec<ListItem> = modes
         .iter()
         .enumerate()
-        .map(|(i, &text)| {
+        .map(|(i, text)| {
             let style = if i == app.security_selected_mode {
                 Style::default()
                     .fg(Color::Black)
@@ -1706,39 +1954,33 @@ fn render_security_setup(frame: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Modos de Encriptacion "),
+            .title(format!(" {} ", rust_i18n::t!("security_modes_title"))),
     );
     frame.render_widget(list, chunks[2]);
 
     // Description box
     let desc_text = mode_descriptions
         .get(app.security_selected_mode)
-        .unwrap_or(&"");
-    let desc = Paragraph::new(format!("Detalle: {}", desc_text))
+        .unwrap_or(&std::borrow::Cow::Borrowed(""));
+    let desc = Paragraph::new(rust_i18n::t!("security_detail_prefix", "desc" => desc_text))
         .style(Style::default().fg(Color::White))
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(desc, chunks[3]);
 
     if app.security_selected_mode == 2 {
-        let pass_text = format!(
-            "Contraseña: {}",
-            "*".repeat(app.security_password_input.len())
-        );
-        let confirm_text = format!(
-            "Confirmar: {}",
-            "*".repeat(app.security_confirm_input.len())
-        );
+        let pass_text = rust_i18n::t!("security_pass_label", "mask" => "*".repeat(app.security_password_input.len()));
+        let confirm_text = rust_i18n::t!("security_confirm_label", "mask" => "*".repeat(app.security_confirm_input.len()));
 
         let input_text = format!("{}  |  {}", pass_text, confirm_text);
 
         let input = Paragraph::new(input_text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Establecer Contraseña "),
+                .title(format!(" {} ", rust_i18n::t!("security_set_pass_title"))),
         );
         frame.render_widget(input, chunks[4]);
     } else {
-        let help = Paragraph::new("Presione ENTER para confirmar seleccion")
+        let help = Paragraph::new(rust_i18n::t!("security_confirm_help"))
             .style(Style::default().add_modifier(Modifier::ITALIC))
             .alignment(Alignment::Center);
         frame.render_widget(help, chunks[4]);
@@ -1749,7 +1991,7 @@ fn render_password_input(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red))
-        .title(" Seguridad - Contraseña Requerida ");
+        .title(format!(" {} ", rust_i18n::t!("password_req_title")));
 
     let area = centered_rect(50, 40, area);
     frame.render_widget(block, area);
@@ -1767,7 +2009,7 @@ fn render_password_input(frame: &mut Frame, app: &App, area: Rect) {
         )
         .split(area);
 
-    let label = Paragraph::new("Ingrese su contraseña maestra para desencriptar la configuracion:")
+    let label = Paragraph::new(rust_i18n::t!("password_req_label"))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     frame.render_widget(label, chunks[0]);
@@ -1775,7 +2017,11 @@ fn render_password_input(frame: &mut Frame, app: &App, area: Rect) {
     let pass_text = "*".repeat(app.security_password_input.len());
     let input = Paragraph::new(pass_text)
         .style(Style::default().fg(Color::Yellow))
-        .block(Block::default().borders(Borders::ALL).title(" Contraseña "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", rust_i18n::t!("password_input_title"))),
+        );
     frame.render_widget(input, chunks[1]);
 
     if let Some(err) = &app.security_error {
@@ -1790,7 +2036,7 @@ fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
-        .title(" Google Drive Integration ");
+        .title(format!(" {} ", rust_i18n::t!("drive_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1808,19 +2054,14 @@ fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     // Info Box
-    let info_text = "PARA QUE FUNCIONE:\n\
-                     1. Debes tener un archivo 'client_secret.json' en la carpeta de la aplicacion.\n\
-                     2. Este archivo identifica a la App ante Google.\n\
-                     3. Al conectar, se abrira tu navegador para que inicies sesion en TU cuenta.\n\
-                     \n\
-                     Nota: Esto permite subir los videos directamente a tu unidad de Google Drive.";
+    let info_text = rust_i18n::t!("drive_info_text");
 
     let info = Paragraph::new(info_text)
         .style(Style::default().fg(Color::White))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Informacion Importante ")
+                .title(format!(" {} ", rust_i18n::t!("drive_info_title")))
                 .border_style(Style::default().fg(Color::Yellow)),
         );
     frame.render_widget(info, layout[0]);
@@ -1842,46 +2083,89 @@ fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let enabled_str = if drive_enabled {
-        "[x] Integracion Habilitada"
+        rust_i18n::t!("drive_enabled_yes")
     } else {
-        "[ ] Integracion Deshabilitada"
+        rust_i18n::t!("drive_enabled_no")
     };
     let auto_str = if drive_auto {
-        "[x] Subida Automatica"
+        rust_i18n::t!("drive_auto_yes")
     } else {
-        "[ ] Subida Manual (Preguntar)"
+        rust_i18n::t!("drive_auto_no")
     };
-    let folder_str = format!(
-        "Carpeta ID: {}",
-        drive_folder.as_deref().unwrap_or("Raiz (Mi Unidad)")
-    );
+    let folder_str = rust_i18n::t!("drive_folder_fmt", "id" => drive_folder.as_deref().unwrap_or(&rust_i18n::t!("drive_folder_root")));
 
-    let options = [
+    let options = vec![
         enabled_str,
         auto_str,
-        folder_str.as_str(),
-        "Guardar y Regresar",
+        folder_str,
+        rust_i18n::t!("drive_save"),
     ];
 
     let items: Vec<ListItem> = options
         .iter()
         .enumerate()
-        .map(|(i, &text)| {
+        .map(|(i, &ref text)| {
             let style = if i == app.drive_selected_index {
                 Style::default().fg(Color::Black).bg(Color::Green)
             } else {
                 Style::default().fg(Color::Green)
             };
-            ListItem::new(text).style(style)
+            ListItem::new(text.clone()).style(style)
         })
         .collect();
 
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Configuracion "),
+            .title(format!(" {} ", rust_i18n::t!("drive_config_title"))),
     );
     frame.render_widget(list, layout[1]);
+}
+
+fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {} ", rust_i18n::t!("language")));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let options = vec!["English", "Español"];
+
+    let list_area = Rect {
+        x: area.width / 2 - 10,
+        y: area.height / 2 - 3,
+        width: 20,
+        height: 6,
+    };
+
+    let list_area = list_area.intersection(inner_area);
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, &text)| {
+            let style = if i == app.language_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let content = format!(" {:^16} ", text);
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", rust_i18n::t!("select_option"))),
+    );
+
+    frame.render_widget(list, list_area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

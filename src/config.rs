@@ -126,6 +126,9 @@ pub struct AppConfig {
     /// Google Gemini API Keys (Rotated)
     #[serde(default, deserialize_with = "deserialize_api_keys")]
     pub google_api_keys: Vec<ApiKey>,
+    /// Interface language (en, es)
+    #[serde(default = "default_language")]
+    pub language: String,
     /// Default output directory for generated shorts
     pub default_output_dir: String,
     /// Whether to automatically start extraction when moments are finished
@@ -151,12 +154,18 @@ pub struct AppConfig {
     pub drive_auto_upload: bool,
     #[serde(default)]
     pub drive_folder_id: Option<String>,
+    #[serde(default)]
+    pub drive_token_data: Option<String>,
 
     // Internal State for Security (Not saved to JSON body)
     #[serde(skip)]
     pub active_encryption_mode: EncryptionMode,
     #[serde(skip)]
     pub active_password: Option<String>,
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 fn default_cookies_path() -> String {
@@ -223,6 +232,7 @@ impl AppConfig {
                 name: "Primary Key".to_string(),
                 enabled: true,
             }],
+            language: "en".to_string(),
             default_output_dir: "./output".to_string(),
             extract_shorts_when_finished_moments: false,
             use_cookies: false,
@@ -232,6 +242,7 @@ impl AppConfig {
             drive_enabled: false,
             drive_auto_upload: false,
             drive_folder_id: None,
+            drive_token_data: None,
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
         };
@@ -313,6 +324,7 @@ mod tests {
                     enabled: true,
                 },
             ],
+            language: "en".to_string(),
             default_output_dir: "./output".to_string(),
             extract_shorts_when_finished_moments: false,
             use_cookies: false,
@@ -322,6 +334,7 @@ mod tests {
             drive_enabled: false,
             drive_auto_upload: false,
             drive_folder_id: None,
+            drive_token_data: None,
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
         };

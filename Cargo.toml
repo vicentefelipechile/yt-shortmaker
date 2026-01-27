@@ -1,6 +1,6 @@
 [package]
 name = "yt-shortmaker"
-version = "1.10.5"
+version = "1.10.6"
 edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["vicentefelipechile"]
@@ -12,6 +12,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rust-i18n = "3"
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 anyhow = "1.0"
 ratatui = "0.29"

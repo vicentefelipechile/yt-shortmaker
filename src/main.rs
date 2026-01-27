@@ -24,6 +24,9 @@ use std::path::Path;
 use std::time::Duration;
 use tui::{App, AppMessage, AppScreen, LogLevel, TuiSender};
 
+// Init translations
+rust_i18n::i18n!("locales");
+
 use types::{SessionState, VideoMoment};
 use video::extract_video_id;
 
@@ -271,6 +274,9 @@ async fn run_tui_mode() -> Result<()> {
     // (like creating default config) happen on the normal stdout, not messing up the TUI.
     let config = load_config_with_fallback()?;
 
+    // Set locale
+    rust_i18n::set_locale(&config.language);
+
     // Setup terminal
     let mut terminal = tui::setup_terminal()?;
 
@@ -469,6 +475,62 @@ async fn run_app(
 
         // Update previous screen for next iteration
         previous_screen = app.screen.clone();
+
+        // Handle Drive Auth Request
+        if app.req_drive_auth {
+            app.req_drive_auth = false;
+            let tx_clone = tx.clone();
+            // Use current config to get tokens if any? No, we are authing.
+            let current_token_data = app.config.as_ref().and_then(|c| c.drive_token_data.clone());
+
+            tokio::spawn(async move {
+                // Ensure we start from clean state or existing?
+                // DriveManager::new takes Option<String>
+                // Logic:
+                // 1. Sync tokens to disk (if any)
+                let _ = drive::DriveManager::import_tokens(current_token_data.as_deref());
+
+                // 2. Create manager (which might read disk)
+                // Actually new(None) is fine if we imported to disk.
+                // But new(Some) tries to populate from string?
+                // Let's use new(None) and rely on disk since authenticate_with_disk uses disk.
+                match drive::DriveManager::new(None).await {
+                    Ok(mut drive) => {
+                        match drive.authenticate().await {
+                            Ok(_) => {
+                                // 3. Export tokens
+                                match drive::DriveManager::export_tokens() {
+                                    Ok(Some(tokens)) => {
+                                        let _ = tx_clone.send(AppMessage::DriveAuthSuccess(tokens));
+                                    }
+                                    Ok(None) => {
+                                        let _ = tx_clone.send(AppMessage::Error(
+                                            "Auth success but no tokens found".to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(AppMessage::Error(format!(
+                                            "Failed to export tokens: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx_clone.send(AppMessage::Error(format!(
+                                    "Authentication failed: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx_clone
+                            .send(AppMessage::Error(format!("Failed to init Drive: {}", e)));
+                    }
+                }
+            });
+        }
 
         // Handle screen transitions
         match &app.screen {
@@ -691,7 +753,12 @@ async fn run_app(
                                             ));
 
                                             // We need to run this in the same async block
-                                            match drive::DriveManager::new().await {
+                                            // Ensure we pass the token data from config
+                                            match drive::DriveManager::new(
+                                                config_clone.drive_token_data.clone(),
+                                            )
+                                            .await
+                                            {
                                                 Ok(drive) => {
                                                     // List files in dir
                                                     match std::fs::read_dir(&dir) {
@@ -789,8 +856,10 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     drive_enabled: false,
                     drive_auto_upload: false,
                     drive_folder_id: None,
+                    drive_token_data: None,
                     active_encryption_mode: security::EncryptionMode::Password,
                     active_password: None,
+                    language: "en".to_string(),
                 });
             }
 
