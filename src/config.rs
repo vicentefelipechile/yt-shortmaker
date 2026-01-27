@@ -258,7 +258,6 @@ impl AppConfig {
     /// Helper to save current state preserving current mode would require knowing the current mode
     /// For now, we'll assume the caller knows the mode, or we default to 'Simple' if not specified?
     /// Actually, in the app flow we should store the 'active encryption mode' in memory.
-
     /// Ensure output directory exists
     pub fn ensure_output_dir(&self) -> Result<()> {
         if !Path::new(&self.default_output_dir).exists() {

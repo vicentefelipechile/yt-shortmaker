@@ -4,7 +4,6 @@
 use anyhow::{Context, Result};
 use google_drive3::oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 use google_drive3::{api::File, DriveHub};
-use hyper;
 use hyper_rustls::HttpsConnector;
 use hyper_rustls::HttpsConnectorBuilder;
 use std::path::Path;
@@ -51,12 +50,11 @@ impl DriveManager {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid filename"))?;
 
-        let mut file_metadata = File::default();
-        file_metadata.name = Some(filename.to_string());
-
-        if let Some(fid) = folder_id {
-            file_metadata.parents = Some(vec![fid.to_string()]);
-        }
+        let file_metadata = File {
+            name: Some(filename.to_string()),
+            parents: folder_id.map(|fid| vec![fid.to_string()]),
+            ..Default::default()
+        };
 
         let mime_type = match file_path.extension().and_then(|e| e.to_str()) {
             Some("mp4") => "video/mp4",

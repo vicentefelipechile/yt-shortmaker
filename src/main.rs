@@ -305,7 +305,7 @@ async fn run_app(
 
     // Initialize app state
     let mut app = App::new(config.default_output_dir.clone());
-    app.active_security_mode = config.active_encryption_mode.clone();
+    app.active_security_mode = config.active_encryption_mode;
     app.active_password = config.active_password.clone();
     app.config = Some(config.clone());
     app.status = "Ready".to_string();
@@ -701,9 +701,7 @@ async fn run_app(
                                                                 let path = entry.path();
                                                                 if path
                                                                     .extension()
-                                                                    .map_or(false, |ext| {
-                                                                        ext == "mp4"
-                                                                    })
+                                                                    .is_some_and(|ext| ext == "mp4")
                                                                 {
                                                                     let _ = tx_clone.send(AppMessage::Progress(0.9, format!("Uploading {}...", path.file_name().unwrap_or_default().to_string_lossy())));
                                                                     if let Err(e) = drive

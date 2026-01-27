@@ -560,7 +560,7 @@ impl App {
 
                     if valid {
                         if let Some(config) = &mut self.config {
-                            config.active_encryption_mode = mode.clone();
+                            config.active_encryption_mode = mode;
                             config.active_password = password_to_save.clone();
 
                             if let Err(e) = config.save() {
@@ -1856,7 +1856,7 @@ fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
         drive_folder.as_deref().unwrap_or("Raiz (Mi Unidad)")
     );
 
-    let options = vec![
+    let options = [
         enabled_str,
         auto_str,
         folder_str.as_str(),
