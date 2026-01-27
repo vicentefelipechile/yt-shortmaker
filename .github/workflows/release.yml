@@ -40,28 +40,28 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: yt-shortmaker.exe
-            asset_name: autoshorts-windows-amd64.exe
+            asset_name: yt-shortmaker-windows-amd64.exe
             use_cross: false
           
           # Windows x86 (32-bit)
           - os: windows-latest
             target: i686-pc-windows-msvc
             artifact_name: yt-shortmaker.exe
-            asset_name: autoshorts-windows-i386.exe
+            asset_name: yt-shortmaker-windows-i386.exe
             use_cross: false
 
           # Windows ARM64
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact_name: yt-shortmaker.exe
-            asset_name: autoshorts-windows-arm64.exe
+            asset_name: yt-shortmaker-windows-arm64.exe
             use_cross: false
 
           # Linux x64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: yt-shortmaker
-            asset_name: autoshorts-linux-amd64
+            asset_name: yt-shortmaker-linux-amd64
             use_cross: false # Standard runner is x64 linux, usually fine without cross, but we stick to consistent env. Check dependencies.
             # Using standard cargo build for x64 linux to rely on apt-get storage in next steps.
 
@@ -69,7 +69,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: yt-shortmaker
-            asset_name: autoshorts-linux-arm64
+            asset_name: yt-shortmaker-linux-arm64
             use_cross: true
 
     runs-on: ${{ matrix.os }}
@@ -140,11 +140,11 @@ jobs:
           
           | Filename | System | Description |
           | :--- | :--- | :--- |
-          | \`autoshorts-windows-amd64.exe\` | **Windows 10/11** (64-bit) | Standard version for most modern PCs. |
-          | \`autoshorts-windows-i386.exe\` | **Windows 7/8/10** (32-bit) | For older or low-end computers. |
-          | \`autoshorts-windows-arm64.exe\` | **Windows ARM64** | For devices like Surface Pro X, Lenovo ThinkPad X13s (Snapdragon). |
-          | \`autoshorts-linux-amd64\` | **Linux** (64-bit) | Standard for servers and desktops (Ubuntu, Debian, Fedora, etc). |
-          | \`autoshorts-linux-arm64\` | **Linux ARM64** | For Raspberry Pi 4/5, AWS Graviton, or other ARM servers. |
+          | \`yt-shortmaker-windows-amd64.exe\` | **Windows 10/11** (64-bit) | Standard version for most modern PCs. |
+          | \`yt-shortmaker-windows-i386.exe\` | **Windows 7/8/10** (32-bit) | For older or low-end computers. |
+          | \`yt-shortmaker-windows-arm64.exe\` | **Windows ARM64** | For devices like Surface Pro X, Lenovo ThinkPad X13s (Snapdragon). |
+          | \`yt-shortmaker-linux-amd64\` | **Linux** (64-bit) | Standard for servers and desktops (Ubuntu, Debian, Fedora, etc). |
+          | \`yt-shortmaker-linux-arm64\` | **Linux ARM64** | For Raspberry Pi 4/5, AWS Graviton, or other ARM servers. |
           EOF
 
       - name: Publish Release

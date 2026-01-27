@@ -1145,7 +1145,7 @@ fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
 
     // Instructions
     let instructions = Paragraph::new(
-        "Welcome! It looks like this is your first time running AutoShorts.\nPlease enter your Google Gemini API Key to continue.",
+        "Welcome! It looks like this is your first time running YT ShortMaker.\nPlease enter your Google Gemini API Key to continue.",
     )
     .style(Style::default().fg(Color::White))
     .wrap(Wrap { trim: true });
