@@ -118,6 +118,8 @@ fn default_true() -> bool {
     true
 }
 
+use crate::security::{EncryptionMode, SecuredConfig};
+
 /// Application configuration stored in settings.json
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -141,6 +143,20 @@ pub struct AppConfig {
     /// Whether to use GPU acceleration (NVENC) for FFmpeg
     #[serde(default)]
     pub gpu_acceleration: Option<bool>,
+
+    // --- Google Drive Integration ---
+    #[serde(default)]
+    pub drive_enabled: bool,
+    #[serde(default)]
+    pub drive_auto_upload: bool,
+    #[serde(default)]
+    pub drive_folder_id: Option<String>,
+
+    // Internal State for Security (Not saved to JSON body)
+    #[serde(skip)]
+    pub active_encryption_mode: EncryptionMode,
+    #[serde(skip)]
+    pub active_password: Option<String>,
 }
 
 fn default_cookies_path() -> String {
@@ -149,10 +165,15 @@ fn default_cookies_path() -> String {
 
 impl AppConfig {
     /// Configuration file name
-    const CONFIG_PATH: &'static str = "settings.json";
+    pub const CONFIG_PATH: &'static str = "settings.json";
 
-    /// Load configuration from file
+    /// Load configuration from file (first attempt)
     pub fn load() -> Result<Self> {
+        Self::load_with_password(None)
+    }
+
+    /// Load configuration with optional password
+    pub fn load_with_password(password: Option<&str>) -> Result<Self> {
         if !Path::new(Self::CONFIG_PATH).exists() {
             return Err(anyhow::anyhow!(
                 "Configuration file not found. Please create settings.json"
@@ -160,16 +181,38 @@ impl AppConfig {
         }
 
         let content = fs::read_to_string(Self::CONFIG_PATH)?;
-        let config: AppConfig = serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse settings.json: {}", e))?;
 
-        if config.google_api_keys.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No API keys found in configuration. Please add google_api_keys to settings.json"
-            ));
+        // Try to parse as SecuredConfig first
+        if let Ok(secured) = serde_json::from_str::<SecuredConfig>(&content) {
+            match secured.decrypt(password) {
+                Ok(decrypted) => {
+                    let mut config: AppConfig = serde_json::from_str(&decrypted.content)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse decrypted config: {}", e))?;
+
+                    config.active_encryption_mode = decrypted.mode;
+                    config.active_password = password.map(|s| s.to_string());
+
+                    Ok(config)
+                }
+                Err(e) => {
+                    // Propagate error (e.g., "Password required")
+                    Err(e)
+                }
+            }
+        } else {
+            // Fallback to legacy/plain JSON
+            let mut config: AppConfig = serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse settings.json: {}", e))?;
+
+            config.active_encryption_mode = EncryptionMode::None;
+            config.active_password = None;
+
+            // Validate basic sanity
+            if config.google_api_keys.is_empty() {
+                return Err(anyhow::anyhow!("No API keys found in configuration."));
+            }
+            Ok(config)
         }
-
-        Ok(config)
     }
 
     /// Create a default configuration file
@@ -186,20 +229,35 @@ impl AppConfig {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
+            drive_enabled: false,
+            drive_auto_upload: false,
+            drive_folder_id: None,
+            active_encryption_mode: EncryptionMode::None,
+            active_password: None,
         };
 
-        let json = serde_json::to_string_pretty(&default_config)?;
-        fs::write(Self::CONFIG_PATH, json)?;
+        // Save as plain text by default for new files
+        default_config.save()?;
 
         Ok(())
     }
 
-    /// Save configuration to file
+    /// Save configuration to file using active encryption mode
     pub fn save(&self) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(Self::CONFIG_PATH, json)?;
+        let json_content = serde_json::to_string_pretty(self)?;
+        let secured = SecuredConfig::new(
+            json_content,
+            self.active_encryption_mode,
+            self.active_password.as_deref(),
+        )?;
+        let file_content = serde_json::to_string_pretty(&secured)?;
+        fs::write(Self::CONFIG_PATH, file_content)?;
         Ok(())
     }
+
+    /// Helper to save current state preserving current mode would require knowing the current mode
+    /// For now, we'll assume the caller knows the mode, or we default to 'Simple' if not specified?
+    /// Actually, in the app flow we should store the 'active encryption mode' in memory.
 
     /// Ensure output directory exists
     pub fn ensure_output_dir(&self) -> Result<()> {
@@ -262,6 +320,11 @@ mod tests {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
+            drive_enabled: false,
+            drive_auto_upload: false,
+            drive_folder_id: None,
+            active_encryption_mode: EncryptionMode::None,
+            active_password: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();

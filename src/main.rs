@@ -3,7 +3,9 @@
 //! using Google Gemini AI for intelligent content analysis.
 
 mod config;
+mod drive;
 mod gemini;
+mod security;
 mod setup;
 mod shorts;
 mod tui;
@@ -14,6 +16,7 @@ use anyhow::{Context, Result};
 use config::AppConfig;
 use crossterm::event::{self, Event, KeyEventKind};
 use gemini::GeminiClient;
+use security::EncryptionMode;
 use simplelog::{Config, LevelFilter, WriteLogger};
 use std::fs;
 use std::fs::OpenOptions;
@@ -302,27 +305,37 @@ async fn run_app(
 
     // Initialize app state
     let mut app = App::new(config.default_output_dir.clone());
+    app.active_security_mode = config.active_encryption_mode.clone();
+    app.active_password = config.active_password.clone();
     app.config = Some(config.clone());
     app.status = "Ready".to_string();
 
     // Start at Main Menu by default
     app.screen = AppScreen::MainMenu;
 
-    // Check for API Keys - if default or empty, go to ApiKeyInput
     let default_key = "YOUR_API_KEY_HERE";
-    if config.google_api_keys.is_empty()
-        || config
-            .google_api_keys
-            .iter()
-            .any(|k| k.value == default_key)
-        || config
-            .google_api_keys
-            .iter()
-            .any(|k| k.value.trim().is_empty())
+
+    // Check for Security FIRST
+    if config.active_encryption_mode == EncryptionMode::Password && config.active_password.is_none()
     {
-        app.screen = AppScreen::ApiKeyInput;
-        app.input.clear();
-        app.cursor_pos = 0;
+        app.screen = AppScreen::PasswordInput;
+        app.security_error = Some("Startup: Password Required".to_string());
+    } else {
+        // Check for API Keys - if default or empty, go to ApiKeyInput
+        if config.google_api_keys.is_empty()
+            || config
+                .google_api_keys
+                .iter()
+                .any(|k| k.value == default_key)
+            || config
+                .google_api_keys
+                .iter()
+                .any(|k| k.value.trim().is_empty())
+        {
+            app.screen = AppScreen::ApiKeyInput;
+            app.input.clear();
+            app.cursor_pos = 0;
+        }
     }
 
     // Create message channel for async communication
@@ -652,7 +665,7 @@ async fn run_app(
                         tokio::spawn(async move {
                             let result = run_extraction(
                                 tx_clone.clone(),
-                                config_clone,
+                                config_clone.clone(),
                                 url_clone,
                                 temp_dir_clone,
                                 temp_json_path_clone,
@@ -668,6 +681,71 @@ async fn run_app(
                                             "Shorts saved to: {}",
                                             dir
                                         )));
+
+                                        // Auto-Upload to Drive
+                                        if config_clone.drive_enabled
+                                            && config_clone.drive_auto_upload
+                                        {
+                                            let _ = tx_clone.send(AppMessage::Status(
+                                                "Uploading to Google Drive...".to_string(),
+                                            ));
+
+                                            // We need to run this in the same async block
+                                            match drive::DriveManager::new().await {
+                                                Ok(drive) => {
+                                                    // List files in dir
+                                                    match std::fs::read_dir(&dir) {
+                                                        Ok(entries) => {
+                                                            let mut count = 0;
+                                                            for entry in entries.flatten() {
+                                                                let path = entry.path();
+                                                                if path
+                                                                    .extension()
+                                                                    .map_or(false, |ext| {
+                                                                        ext == "mp4"
+                                                                    })
+                                                                {
+                                                                    let _ = tx_clone.send(AppMessage::Progress(0.9, format!("Uploading {}...", path.file_name().unwrap_or_default().to_string_lossy())));
+                                                                    if let Err(e) = drive
+                                                                        .upload_file(
+                                                                            &path,
+                                                                            config_clone
+                                                                                .drive_folder_id
+                                                                                .as_deref(),
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        let _ = tx_clone.send(AppMessage::Error(format!("Upload failed: {}", e)));
+                                                                    } else {
+                                                                        count += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                            let _ = tx_clone.send(AppMessage::Log(
+                                                                LogLevel::Success,
+                                                                format!(
+                                                                    "Uploaded {} videos to Drive",
+                                                                    count
+                                                                ),
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_clone.send(
+                                                                AppMessage::Error(format!(
+                                                                    "Failed to read shorts dir: {}",
+                                                                    e
+                                                                )),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx_clone.send(AppMessage::Error(
+                                                        format!("Drive Auth failed: {}", e),
+                                                    ));
+                                                }
+                                            }
+                                        }
                                     }
                                     let _ = tx_clone.send(AppMessage::Finished);
                                 }
@@ -696,31 +774,37 @@ async fn run_app(
 
 /// Load configuration with fallback for missing file
 fn load_config_with_fallback() -> Result<AppConfig> {
-    // Try to load existing config
-    if Path::new("settings.json").exists() {
-        let content = fs::read_to_string("settings.json")?;
-        let config: AppConfig = serde_json::from_str(&content).map_err(|_| {
-            anyhow::anyhow!(
-                "Configuration file format has changed. Please delete settings.json and restart."
-            )
-        })?;
+    match AppConfig::load() {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("Password required") {
+                // Return a dummy config to bootstrap the App into Password Input mode
+                return Ok(AppConfig {
+                    google_api_keys: vec![],
+                    default_output_dir: "./output".to_string(),
+                    extract_shorts_when_finished_moments: false,
+                    use_cookies: false,
+                    cookies_path: "./cookies.json".to_string(),
+                    shorts_config: config::ShortsConfig::default(),
+                    gpu_acceleration: None,
+                    drive_enabled: false,
+                    drive_auto_upload: false,
+                    drive_folder_id: None,
+                    active_encryption_mode: security::EncryptionMode::Password,
+                    active_password: None,
+                });
+            }
 
-        if config.google_api_keys.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No API keys found in configuration. Please delete settings.json and restart."
-            ));
+            if err_msg.contains("Configuration file not found") {
+                println!("📝 Configuration file not found. Creating default settings.json...");
+                AppConfig::create_default()?;
+                return AppConfig::load();
+            }
+
+            Err(e)
         }
-
-        return Ok(config);
     }
-
-    // Create default config automatically
-    println!("📝 Configuration file not found. Creating default settings.json...");
-    AppConfig::create_default()?;
-
-    // Load the newly created config
-    let config = AppConfig::load()?;
-    Ok(config)
 }
 
 /// Run the main processing pipeline

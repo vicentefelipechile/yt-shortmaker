@@ -12,7 +12,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
@@ -84,6 +84,12 @@ pub enum AppScreen {
     ApiKeyAddInput,
     /// Rename API Key
     ApiKeyRename,
+    /// Security Setup (First run or migration)
+    SecuritySetup,
+    /// Password Input (Startup)
+    PasswordInput,
+    /// Google Drive Menu
+    GoogleDriveMenu,
 }
 
 /// Log entry
@@ -120,8 +126,20 @@ pub struct App {
     pub start_time: Instant,
     /// Current status message
     pub status: String,
-    /// Log entries
     pub logs: Vec<LogEntry>,
+
+    // Security State
+    pub security_password_input: String,
+    pub security_confirm_input: String, // For setting new password
+    pub security_selected_mode: usize,  // 0: None, 1: Simple, 2: Password
+    pub security_error: Option<String>,
+
+    // Drive Menu State
+    pub drive_selected_index: usize,
+
+    // Active Security Context (for saving)
+    pub active_security_mode: crate::security::EncryptionMode,
+    pub active_password: Option<String>,
     /// Current progress (0.0 - 1.0)
     pub progress: f64,
     /// Progress label
@@ -170,6 +188,13 @@ impl App {
             start_time: Instant::now(),
             status: "Initializing...".to_string(),
             logs: Vec::new(),
+            security_password_input: String::new(),
+            security_confirm_input: String::new(),
+            security_selected_mode: 1, // Default to Simple (Recommended)
+            security_error: None,
+            drive_selected_index: 0,
+            active_security_mode: crate::security::EncryptionMode::None,
+            active_password: None,
             progress: 0.0,
             progress_label: String::new(),
             moments: Vec::new(),
@@ -490,16 +515,164 @@ impl App {
                 }
                 _ => {}
             },
+            AppScreen::SecuritySetup => match key {
+                KeyCode::Up => {
+                    if self.security_selected_mode > 0 {
+                        self.security_selected_mode -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.security_selected_mode < 2 {
+                        self.security_selected_mode += 1;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    // Handle password input if mode 2 is selected
+                    if self.security_selected_mode == 2 {
+                        self.security_password_input.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if self.security_selected_mode == 2 {
+                        self.security_password_input.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    // Apply Security Settings
+                    let mode = match self.security_selected_mode {
+                        0 => crate::security::EncryptionMode::None,
+                        1 => crate::security::EncryptionMode::Simple,
+                        2 => crate::security::EncryptionMode::Password,
+                        _ => crate::security::EncryptionMode::Simple,
+                    };
+
+                    let mut valid = true;
+                    let mut password_to_save = None;
+
+                    if let crate::security::EncryptionMode::Password = mode {
+                        if self.security_password_input.len() < 4 {
+                            self.security_error = Some("Password too short".to_string());
+                            valid = false;
+                        } else {
+                            password_to_save = Some(self.security_password_input.clone());
+                        }
+                    }
+
+                    if valid {
+                        if let Some(config) = &mut self.config {
+                            config.active_encryption_mode = mode.clone();
+                            config.active_password = password_to_save.clone();
+
+                            if let Err(e) = config.save() {
+                                self.security_error = Some(format!("Save failed: {}", e));
+                            } else {
+                                self.active_security_mode = mode;
+                                self.active_password = password_to_save;
+                                self.screen = AppScreen::MainMenu;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::MainMenu;
+                    self.security_password_input.clear();
+                    self.security_error = None;
+                }
+                _ => {}
+            },
+            AppScreen::PasswordInput => match key {
+                KeyCode::Char(c) => {
+                    self.security_password_input.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.security_password_input.pop();
+                }
+                KeyCode::Enter => {
+                    // Attempt to decrypt
+                    match crate::config::AppConfig::load_with_password(Some(
+                        &self.security_password_input,
+                    )) {
+                        Ok(config) => {
+                            self.config = Some(config.clone());
+                            self.active_security_mode = config.active_encryption_mode;
+                            self.active_password = config.active_password;
+                            self.security_error = None;
+
+                            // Check keys again
+                            let default_key = "YOUR_API_KEY_HERE";
+                            if config.google_api_keys.is_empty()
+                                || config
+                                    .google_api_keys
+                                    .iter()
+                                    .any(|k| k.value == default_key)
+                            {
+                                self.screen = AppScreen::ApiKeyInput;
+                            } else {
+                                self.screen = AppScreen::MainMenu;
+                            }
+                        }
+                        Err(_) => {
+                            self.security_error =
+                                Some("Incorrect password or invalid file".to_string());
+                            self.security_password_input.clear();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            },
+            AppScreen::GoogleDriveMenu => match key {
+                KeyCode::Up => {
+                    if self.drive_selected_index > 0 {
+                        self.drive_selected_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.drive_selected_index < 3 {
+                        self.drive_selected_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(config) = &mut self.config {
+                        match self.drive_selected_index {
+                            0 => {
+                                // Toggle Enable
+                                config.drive_enabled = !config.drive_enabled;
+                            }
+                            1 => {
+                                // Toggle Auto Upload
+                                config.drive_auto_upload = !config.drive_auto_upload;
+                            }
+                            2 => {
+                                // Edit Folder ID (Placeholder for now, essentially toggle None vs Some("root"))
+                                // A proper input would be better, but for now reset to default or loop?
+                            }
+                            3 => {
+                                // Save and Return
+                                let _ = config.save(); // Config knows active mode
+                                self.screen = AppScreen::MainMenu;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::MainMenu;
+                }
+                _ => {}
+            },
             AppScreen::MainMenu => match key {
                 KeyCode::Up => {
                     if self.menu_index > 0 {
                         self.menu_index -= 1;
                     } else {
-                        self.menu_index = 3; // Loop to bottom
+                        self.menu_index = 5; // Loop to bottom
                     }
                 }
                 KeyCode::Down => {
-                    if self.menu_index < 3 {
+                    if self.menu_index < 5 {
                         self.menu_index += 1;
                     } else {
                         self.menu_index = 0; // Loop to top
@@ -507,25 +680,38 @@ impl App {
                 }
                 KeyCode::Enter => {
                     match self.menu_index {
-                        0 => {
-                            // Comenzar
-                            self.screen = AppScreen::UrlInput;
-                        }
+                        0 => self.screen = AppScreen::UrlInput,
                         1 => {
-                            // Config
                             self.reload_settings_items();
                             self.settings_index = 0;
                             self.screen = AppScreen::SettingsEditor;
                         }
                         2 => {
+                            // Google Drive
+                            self.drive_selected_index = 0;
+                            self.screen = AppScreen::GoogleDriveMenu;
+                        }
+                        3 => {
+                            // Security
+                            // Initialize input state
+                            if let Some(config) = &self.config {
+                                let mode_idx = match config.active_encryption_mode {
+                                    crate::security::EncryptionMode::None => 0,
+                                    crate::security::EncryptionMode::Simple => 1,
+                                    crate::security::EncryptionMode::Password => 2,
+                                };
+                                self.security_selected_mode = mode_idx;
+                                self.security_password_input.clear();
+                                self.security_error = None;
+                            }
+                            self.screen = AppScreen::SecuritySetup;
+                        }
+                        4 => {
                             // API Keys
                             self.screen = AppScreen::ApiKeysManager;
                             self.api_keys_index = 0;
                         }
-                        3 => {
-                            // Salir
-                            self.should_quit = true;
-                        }
+                        5 => self.should_quit = true, // Exit
                         _ => {}
                     }
                 }
@@ -800,6 +986,9 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::ApiKeysManager => render_api_keys_manager(frame, app, area),
         AppScreen::ApiKeyAddInput => render_api_key_add_input(frame, app, area),
         AppScreen::ApiKeyRename => render_api_key_rename(frame, app, area),
+        AppScreen::SecuritySetup => render_security_setup(frame, app, area),
+        AppScreen::PasswordInput => render_password_input(frame, app, area),
+        AppScreen::GoogleDriveMenu => render_google_drive_menu(frame, app, area),
     }
 }
 
@@ -998,7 +1187,14 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = &["Comenzar", "Configuracion", "Administrar Keys", "Salir"];
+    let options = &[
+        "Comenzar",
+        "Configuracion",
+        "Google Drive",
+        "Seguridad",
+        "Administrar Keys",
+        "Salir",
+    ];
 
     let list_area = Rect {
         x: area.width / 2 - 15,
@@ -1446,4 +1642,270 @@ pub type TuiReceiver = mpsc::UnboundedReceiver<AppMessage>;
 /// Create a new message channel
 pub fn create_channel() -> (TuiSender, TuiReceiver) {
     mpsc::unbounded_channel()
+}
+
+fn render_security_setup(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Configuracion de Seguridad ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(
+            [
+                Constraint::Length(4), // Intro text
+                Constraint::Length(3), // Options header
+                Constraint::Min(5),    // Options list
+                Constraint::Length(3), // Description
+                Constraint::Length(3), // Confirm button/hint
+            ]
+            .as_ref(),
+        )
+        .split(inner);
+
+    let intro_text = Paragraph::new(
+        "Se ha detectado una nueva configuracion o actualizacion importante.\n\
+         Seleccione como desea proteger sus datos sensibles (API Keys, Tokens):",
+    )
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true });
+    frame.render_widget(intro_text, chunks[0]);
+
+    let modes = [
+        "No aplicar seguridad",
+        "Encriptado Simple (Recomendado)",
+        "Contraseña Maestra",
+    ];
+    let mode_descriptions = [
+        "Los datos se guardan en texto plano (settings.json).",
+        "Los datos se ofuscan. Protege contra lectura casual. No requiere contraseña.",
+        "Los datos se encriptan con AES-256. Requiere contraseña al iniciar la App.",
+    ];
+
+    let items: Vec<ListItem> = modes
+        .iter()
+        .enumerate()
+        .map(|(i, &text)| {
+            let style = if i == app.security_selected_mode {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            ListItem::new(format!(" {} ", text)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Modos de Encriptacion "),
+    );
+    frame.render_widget(list, chunks[2]);
+
+    // Description box
+    let desc_text = mode_descriptions
+        .get(app.security_selected_mode)
+        .unwrap_or(&"");
+    let desc = Paragraph::new(format!("Detalle: {}", desc_text))
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(desc, chunks[3]);
+
+    if app.security_selected_mode == 2 {
+        let pass_text = format!(
+            "Contraseña: {}",
+            "*".repeat(app.security_password_input.len())
+        );
+        let confirm_text = format!(
+            "Confirmar: {}",
+            "*".repeat(app.security_confirm_input.len())
+        );
+
+        let input_text = format!("{}  |  {}", pass_text, confirm_text);
+
+        let input = Paragraph::new(input_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Establecer Contraseña "),
+        );
+        frame.render_widget(input, chunks[4]);
+    } else {
+        let help = Paragraph::new("Presione ENTER para confirmar seleccion")
+            .style(Style::default().add_modifier(Modifier::ITALIC))
+            .alignment(Alignment::Center);
+        frame.render_widget(help, chunks[4]);
+    }
+}
+
+fn render_password_input(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" Seguridad - Contraseña Requerida ");
+
+    let area = centered_rect(50, 40, area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(
+            [
+                Constraint::Length(3), // Label
+                Constraint::Length(3), // Input
+                Constraint::Length(3), // Error
+            ]
+            .as_ref(),
+        )
+        .split(area);
+
+    let label = Paragraph::new("Ingrese su contraseña maestra para desencriptar la configuracion:")
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(label, chunks[0]);
+
+    let pass_text = "*".repeat(app.security_password_input.len());
+    let input = Paragraph::new(pass_text)
+        .style(Style::default().fg(Color::Yellow))
+        .block(Block::default().borders(Borders::ALL).title(" Contraseña "));
+    frame.render_widget(input, chunks[1]);
+
+    if let Some(err) = &app.security_error {
+        let err_text = Paragraph::new(err.as_str())
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center);
+        frame.render_widget(err_text, chunks[2]);
+    }
+}
+
+fn render_google_drive_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Google Drive Integration ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Length(8),  // Info Box (IMPORTANT)
+                Constraint::Length(10), // Settings List
+                Constraint::Length(3),  // Actions
+            ]
+            .as_ref(),
+        )
+        .split(inner);
+
+    // Info Box
+    let info_text = "PARA QUE FUNCIONE:\n\
+                     1. Debes tener un archivo 'client_secret.json' en la carpeta de la aplicacion.\n\
+                     2. Este archivo identifica a la App ante Google.\n\
+                     3. Al conectar, se abrira tu navegador para que inicies sesion en TU cuenta.\n\
+                     \n\
+                     Nota: Esto permite subir los videos directamente a tu unidad de Google Drive.";
+
+    let info = Paragraph::new(info_text)
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Informacion Importante ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+    frame.render_widget(info, layout[0]);
+
+    // Settings Items
+    // 0: Enable Drive [x]
+    // 1: Auto Upload [ ]
+    // 2: Folder ID: [.....]
+    // 3: Save & Return
+
+    let (drive_enabled, drive_auto, drive_folder) = if let Some(config) = &app.config {
+        (
+            config.drive_enabled,
+            config.drive_auto_upload,
+            config.drive_folder_id.clone(),
+        )
+    } else {
+        (false, false, None)
+    };
+
+    let enabled_str = if drive_enabled {
+        "[x] Integracion Habilitada"
+    } else {
+        "[ ] Integracion Deshabilitada"
+    };
+    let auto_str = if drive_auto {
+        "[x] Subida Automatica"
+    } else {
+        "[ ] Subida Manual (Preguntar)"
+    };
+    let folder_str = format!(
+        "Carpeta ID: {}",
+        drive_folder.as_deref().unwrap_or("Raiz (Mi Unidad)")
+    );
+
+    let options = vec![
+        enabled_str,
+        auto_str,
+        folder_str.as_str(),
+        "Guardar y Regresar",
+    ];
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, &text)| {
+            let style = if i == app.drive_selected_index {
+                Style::default().fg(Color::Black).bg(Color::Green)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Configuracion "),
+    );
+    frame.render_widget(list, layout[1]);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(popup_layout[1])[1]
 }
