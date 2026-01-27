@@ -30,6 +30,7 @@ enum SetupStatus {
         progress: f64, // 0.0 - 1.0
         details: String,
     },
+    #[cfg(windows)]
     Extracting {
         details: String,
     },
@@ -390,6 +391,7 @@ fn render_setup(frame: &mut Frame, status: &SetupStatus, install_path: &Path) {
                 .ratio(*progress);
             frame.render_widget(gauge, content_layout[2]);
         }
+        #[cfg(windows)]
         SetupStatus::Extracting { details } => {
             frame.render_widget(Paragraph::new("Installing..."), content_layout[0]);
             frame.render_widget(Paragraph::new(details.clone()), content_layout[1]);
