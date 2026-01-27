@@ -1,4 +1,4 @@
-//! Configuration management for AutoShorts-Rust-CLI
+//! Configuration management for YT ShortMaker
 //! Handles loading and saving settings to settings.json
 
 use anyhow::Result;

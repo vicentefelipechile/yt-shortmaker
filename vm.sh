@@ -43,9 +43,9 @@ mkdir -p $HOME/build_artifacts
 # Añadir alias y variables al .bashrc si no existen
 if ! grep -q "alias build-shorts" "$HOME/.bashrc"; then
     echo "" >> "$HOME/.bashrc"
-    echo "# Configuración de autoshorts-rust-cli" >> "$HOME/.bashrc"
+    echo "# Configuración de yt-shortmaker" >> "$HOME/.bashrc"
     echo "export CARGO_TARGET_DIR=\$HOME/build_artifacts" >> "$HOME/.bashrc"
-    echo "alias build-shorts='cargo build --release && mv \$CARGO_TARGET_DIR/release/autoshorts-rust-cli ~/autoshorts-rust-cli'" >> "$HOME/.bashrc"
+    echo "alias build-shorts='cargo build --release && mv \$CARGO_TARGET_DIR/release/yt-shortmaker ~/yt-shortmaker'" >> "$HOME/.bashrc"
     echo "Alias 'build-shorts' añadido a .bashrc"
 fi
 

@@ -39,28 +39,28 @@ jobs:
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: autoshorts-rust-cli.exe
+            artifact_name: yt-shortmaker.exe
             asset_name: autoshorts-windows-amd64.exe
             use_cross: false
           
           # Windows x86 (32-bit)
           - os: windows-latest
             target: i686-pc-windows-msvc
-            artifact_name: autoshorts-rust-cli.exe
+            artifact_name: yt-shortmaker.exe
             asset_name: autoshorts-windows-i386.exe
             use_cross: false
 
           # Windows ARM64
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-            artifact_name: autoshorts-rust-cli.exe
+            artifact_name: yt-shortmaker.exe
             asset_name: autoshorts-windows-arm64.exe
             use_cross: false
 
           # Linux x64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: autoshorts-rust-cli
+            artifact_name: yt-shortmaker
             asset_name: autoshorts-linux-amd64
             use_cross: false # Standard runner is x64 linux, usually fine without cross, but we stick to consistent env. Check dependencies.
             # Using standard cargo build for x64 linux to rely on apt-get storage in next steps.
@@ -68,7 +68,7 @@ jobs:
           # Linux ARM64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact_name: autoshorts-rust-cli
+            artifact_name: yt-shortmaker
             asset_name: autoshorts-linux-arm64
             use_cross: true
 

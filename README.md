@@ -1,6 +1,6 @@
 [![Release](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml/badge.svg)](https://github.com/vicentefelipechile/yt-shortmaker/actions/workflows/release.yml)
 
-# AutoShorts-Rust-CLI 🎬
+# YT ShortMaker 🎬
 
 A robust, interactive CLI tool built in Rust to automate the creation of YouTube Shorts from long-form content. It features a full Terminal User Interface (TUI), persistent settings management, automatic session recovery, and leverages Google Gemini AI for intelligent content analysis.
 

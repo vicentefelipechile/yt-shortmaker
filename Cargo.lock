@@ -51,26 +51,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "autoshorts-rust-cli"
-version = "1.8.0"
-dependencies = [
- "anyhow",
- "chrono",
- "crossterm",
- "image",
- "log",
- "openssl",
- "ratatui",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "simplelog",
- "tokio",
- "winres",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2387,6 +2367,26 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "yt-shortmaker"
+version = "1.9.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm",
+ "image",
+ "log",
+ "openssl",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "simplelog",
+ "tokio",
+ "winres",
 ]
 
 [[package]]

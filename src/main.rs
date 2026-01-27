@@ -1,4 +1,4 @@
-//! AutoShorts-Rust-CLI
+//! YT ShortMaker
 //! A robust TUI tool to automate YouTube Shorts creation from long-form content
 //! using Google Gemini AI for intelligent content analysis.
 
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                 .append(true)
                 .open("debug.log")?,
         );
-        log::info!("Starting AutoShorts-Rust-CLI with debug logging");
+        log::info!("Starting YT ShortMaker with debug logging");
         log::debug!("Raw Args: {:?}", args);
     }
 
@@ -195,7 +195,7 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
 
 /// Print help message
 fn print_help(program: &str) {
-    println!("AutoShorts-Rust-CLI v{}", types::APP_VERSION);
+    println!("YT ShortMaker v{}", types::APP_VERSION);
     println!();
     println!("USAGE:");
     println!(

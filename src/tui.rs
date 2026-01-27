@@ -1,4 +1,4 @@
-//! Terminal User Interface module for AutoShorts-Rust-CLI
+//! Terminal User Interface module for YT ShortMaker
 //! Built with Ratatui for a rich interactive experience
 
 use std::io::{self, Stdout};

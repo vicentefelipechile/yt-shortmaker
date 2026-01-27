@@ -1,4 +1,4 @@
-//! Google Gemini AI integration for AutoShorts-Rust-CLI
+//! Google Gemini AI integration for YT ShortMaker
 //! Handles video upload and AI analysis for identifying key moments
 
 use anyhow::{anyhow, Context, Result};
@@ -18,10 +18,29 @@ pub struct GeminiClient {
     model: String,
 }
 
+// Response schema definitions
+#[derive(Debug, Serialize)]
+struct GenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(rename = "responseMimeType")]
+    response_mime_type: String,
+    #[serde(rename = "responseSchema")]
+    response_schema: Option<ResponseSchema>,
+    #[serde(rename = "mediaResolution")]
+    media_resolution: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseSchema {
+    #[serde(rename = "type")]
+    schema_type: String,
+    properties: serde_json::Value,
+    required: Vec<String>,
+}
+
 /// System prompt for video analysis
 const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Your task is to analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
-
-You must return the response STRICTLY in JSON format. Do not include markdown formatting.
 
 Identify moments that fit these categories:
 - Funny
@@ -33,11 +52,9 @@ Constraints:
 1. Duration: 10 seconds to 90 seconds.
 2. Provide a brief description.
 3. Use timestamp format "HH:MM:SS".
+4. Include any memorable dialogue in the 'dialogue' field.
 
-Output structure example:
-[{"start_time": "00:05:20", "end_time": "00:06:10", "category": "Funny", "description": "Player falls."}]
-
-If no suitable moments are found, return an empty array: []"#;
+If no suitable moments are found, return an empty array in the moments field."#;
 
 /// Response from Gemini API
 #[derive(Debug, Deserialize)]
@@ -88,6 +105,8 @@ struct GenerateContentRequest {
     contents: Vec<ContentRequest>,
     #[serde(rename = "systemInstruction")]
     system_instruction: SystemInstruction,
+    #[serde(rename = "generationConfig")]
+    generation_config: GenerationConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +276,43 @@ impl GeminiClient {
             self.model, current_key
         );
 
+        // Construct the JSON Schema for structured output
+        // Based on request_example.txt
+        let response_schema = ResponseSchema {
+            schema_type: "object".to_string(),
+            properties: serde_json::json!({
+                "moments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_time": { "type": "string" },
+                            "end_time": { "type": "string" },
+                            "category": {
+                                "type": "string",
+                                "enum": ["Funny", "Interesting", "Incredible Play", "Cinematic", "Other"]
+                            },
+                            "description": { "type": "string" },
+                            "dialogue": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "start_time": { "type": "string" },
+                                        "end_time": { "type": "string" },
+                                        "phrase": { "type": "string" }
+                                    },
+                                    "required": ["start_time", "end_time", "phrase"]
+                                }
+                            }
+                        },
+                        "required": ["start_time", "end_time", "category", "description"]
+                    }
+                }
+            }),
+            required: vec!["moments".to_string()],
+        };
+
         let request = GenerateContentRequest {
             contents: vec![ContentRequest {
                 parts: vec![
@@ -277,6 +333,12 @@ impl GeminiClient {
                 parts: vec![TextPart {
                     text: SYSTEM_PROMPT.to_string(),
                 }],
+            },
+            generation_config: GenerationConfig {
+                temperature: Some(0.4), // Slightly creative but focused
+                response_mime_type: "application/json".to_string(),
+                response_schema: Some(response_schema),
+                media_resolution: Some("MEDIA_RESOLUTION_LOW".to_string()),
             },
         };
 
@@ -305,7 +367,11 @@ impl GeminiClient {
             .and_then(|p| p.text)
             .ok_or_else(|| anyhow!("No response from Gemini"))?;
 
-        // Clean up the response (remove markdown code blocks if present)
+        #[derive(Deserialize)]
+        struct AnalysisResponse {
+            moments: Vec<VideoMoment>,
+        }
+
         let cleaned = text
             .trim()
             .trim_start_matches("```json")
@@ -313,9 +379,10 @@ impl GeminiClient {
             .trim_end_matches("```")
             .trim();
 
-        // Parse the JSON response
-        let mut moments: Vec<VideoMoment> =
-            serde_json::from_str(cleaned).context("Failed to parse moments JSON")?;
+        let analysis_response: AnalysisResponse =
+            serde_json::from_str(cleaned).context("Failed to parse structured moments JSON")?;
+
+        let mut moments = analysis_response.moments;
 
         // Adjust timestamps based on chunk offset
         if chunk_start_offset > 0 {
@@ -329,6 +396,18 @@ impl GeminiClient {
 
                 moment.start_time = crate::video::format_seconds_to_timestamp(start_secs);
                 moment.end_time = crate::video::format_seconds_to_timestamp(end_secs);
+
+                // Adjust dialogue timestamps too if present
+                for dia in &mut moment.dialogue {
+                    let d_start = crate::video::parse_timestamp_to_seconds(&dia.start_time)
+                        .unwrap_or(0)
+                        + chunk_start_offset;
+                    let d_end = crate::video::parse_timestamp_to_seconds(&dia.end_time)
+                        .unwrap_or(0)
+                        + chunk_start_offset;
+                    dia.start_time = crate::video::format_seconds_to_timestamp(d_start);
+                    dia.end_time = crate::video::format_seconds_to_timestamp(d_end);
+                }
             }
         }
 
@@ -346,5 +425,38 @@ mod tests {
         let moments: Vec<VideoMoment> = serde_json::from_str(json).unwrap();
         assert_eq!(moments.len(), 1);
         assert_eq!(moments[0].category, "Funny");
+        assert!(moments[0].dialogue.is_empty());
+    }
+
+    #[test]
+    fn test_parse_structured_response() {
+        let json = r#"{
+          "moments": [
+            {
+              "start_time": "02:33",
+              "end_time": "03:01",
+              "category": "Cinematic",
+              "description": "Description text.",
+              "dialogue": [
+                {
+                  "start_time": "02:33.500",
+                  "end_time": "02:37.000",
+                  "phrase": "Hello world"
+                }
+              ]
+            }
+          ]
+        }"#;
+
+        #[derive(Deserialize)]
+        struct AnalysisResponse {
+            moments: Vec<VideoMoment>,
+        }
+
+        let response: AnalysisResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.moments.len(), 1);
+        assert_eq!(response.moments[0].category, "Cinematic");
+        assert_eq!(response.moments[0].dialogue.len(), 1);
+        assert_eq!(response.moments[0].dialogue[0].phrase, "Hello world");
     }
 }

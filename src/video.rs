@@ -1,4 +1,4 @@
-//! Video processing module for AutoShorts-Rust-CLI
+//! Video processing module for YT ShortMaker
 //! Handles yt-dlp downloads, ffmpeg operations, and chunk management
 
 use anyhow::{anyhow, Context, Result};
@@ -11,7 +11,8 @@ use regex::Regex;
 /// Extract video ID from YouTube URL
 pub fn extract_video_id(url: &str) -> Option<String> {
     let re = Regex::new(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*").ok()?;
-    re.captures(url).and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+    re.captures(url)
+        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Check if required external dependencies are available
@@ -147,7 +148,7 @@ pub async fn download_low_res(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("yt-dlp failed: {}", stderr.trim()));
     }
-    
+
     // Log output if debug is enabled (checked via log level)
     if log::log_enabled!(log::Level::Debug) {
         let stdout = String::from_utf8_lossy(&output.stdout);

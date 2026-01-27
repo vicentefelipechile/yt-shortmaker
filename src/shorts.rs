@@ -1,4 +1,4 @@
-//! Shorts transformation module for AutoShorts-Rust-CLI
+//! Shorts transformation module for YT ShortMaker
 //! Converts extracted clips to YouTube Shorts format (9:16) with layered composition
 
 use anyhow::{anyhow, Context, Result};
