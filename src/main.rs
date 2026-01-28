@@ -632,10 +632,7 @@ async fn run_app(
                         .await;
 
                         match result {
-                            Ok((moments, shorts_dir)) => {
-                                for m in &moments {
-                                    let _ = tx_clone.send(AppMessage::MomentFound(m.clone()));
-                                }
+                            Ok((_moments, shorts_dir)) => {
                                 if let Some(dir) = shorts_dir {
                                     let _ = tx_clone.send(AppMessage::Complete(format!(
                                         "Shorts saved to: {}",

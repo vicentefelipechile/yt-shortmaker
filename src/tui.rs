@@ -228,13 +228,6 @@ impl App {
                     description: rust_i18n::t!("desc_output_dir").to_string(),
                 },
                 SettingItem {
-                    name: "Output Directory".to_string(),
-                    key: "output_dir".to_string(),
-                    value: config.default_output_dir.clone(),
-                    kind: SettingType::String,
-                    description: rust_i18n::t!("desc_output_dir").to_string(),
-                },
-                SettingItem {
                     name: "Auto Extract".to_string(),
                     key: "auto_extract".to_string(),
                     value: config.extract_shorts_when_finished_moments.to_string(),
