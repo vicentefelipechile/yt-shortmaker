@@ -269,6 +269,13 @@ impl App {
                     kind: SettingType::Float,
                     description: rust_i18n::t!("desc_zoom").to_string(),
                 },
+                SettingItem {
+                    name: "Use Fast Model".to_string(),
+                    key: "fast_model".to_string(),
+                    value: config.use_fast_model.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Use faster model (gemini-3-flash)".to_string(),
+                },
             ];
         }
     }
@@ -292,6 +299,7 @@ impl App {
                         config.shorts_config.background_opacity = val.parse().unwrap_or(0.4)
                     }
                     "zoom" => config.shorts_config.main_video_zoom = val.parse().unwrap_or(0.7),
+                    "fast_model" => config.use_fast_model = val.parse().unwrap_or(true),
                     _ => {}
                 }
 

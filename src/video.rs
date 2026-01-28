@@ -266,8 +266,10 @@ pub async fn split_video(
                 &start_time,
                 "-t",
                 &duration_time,
-                "-c",
+                "-c:v",
                 "copy",
+                "-c:a",
+                "aac",
                 "-y",
                 &chunk_path,
             ])

@@ -728,6 +728,7 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     cookies_path: "./cookies.json".to_string(),
                     shorts_config: config::ShortsConfig::default(),
                     gpu_acceleration: None,
+                    use_fast_model: true,
 
                     active_encryption_mode: security::EncryptionMode::Password,
                     active_password: None,
@@ -861,7 +862,7 @@ async fn run_processing(
         return Ok((Vec::new(), None));
     }
 
-    let gemini = GeminiClient::new(enabled_keys);
+    let gemini = GeminiClient::new(enabled_keys, config.use_fast_model);
 
     for (i, chunk) in video_chunks.iter().enumerate() {
         let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));

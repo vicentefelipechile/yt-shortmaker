@@ -146,6 +146,9 @@ pub struct AppConfig {
     /// Whether to use GPU acceleration (NVENC) for FFmpeg
     #[serde(default)]
     pub gpu_acceleration: Option<bool>,
+    /// Whether to use the fast model (gemini-3-flash-preview) or pro model
+    #[serde(default = "default_true")]
+    pub use_fast_model: bool,
 
     // Internal State for Security (Not saved to JSON body)
     #[serde(skip)]
@@ -229,6 +232,7 @@ impl AppConfig {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
+            use_fast_model: true,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
@@ -318,6 +322,7 @@ mod tests {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
+            use_fast_model: true,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,

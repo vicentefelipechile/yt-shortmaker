@@ -146,12 +146,18 @@ struct TextPart {
 
 impl GeminiClient {
     /// Create a new Gemini client
-    pub fn new(api_keys: Vec<String>) -> Self {
+    pub fn new(api_keys: Vec<String>, use_fast_model: bool) -> Self {
+        let model = if use_fast_model {
+            "gemini-3-flash-preview".to_string()
+        } else {
+            "gemini-3-pro-preview".to_string()
+        };
+
         Self {
             client: Client::new(),
             api_keys,
             current_key_index: AtomicUsize::new(0),
-            model: "gemini-3-flash-preview".to_string(),
+            model,
         }
     }
 
