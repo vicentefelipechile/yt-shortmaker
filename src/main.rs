@@ -397,6 +397,8 @@ async fn run_app(
                         } else {
                             app.log(LogLevel::Success, "API Key saved successfully!".to_string());
                             app.screen = AppScreen::MainMenu;
+                            app.input.clear();
+                            app.cursor_pos = 0;
                         }
                     }
                 } else {

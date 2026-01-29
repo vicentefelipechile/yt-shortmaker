@@ -692,7 +692,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     match self.menu_index {
-                        0 => self.screen = AppScreen::UrlInput,
+                        0 => {
+                            self.screen = AppScreen::UrlInput;
+                            self.input.clear();
+                            self.cursor_pos = 0;
+                        }
                         1 => {
                             if let Some(config) = &self.config {
                                 self.language_index = if config.language == "es" { 1 } else { 0 };
