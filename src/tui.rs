@@ -696,6 +696,7 @@ impl App {
                             self.screen = AppScreen::UrlInput;
                             self.input.clear();
                             self.cursor_pos = 0;
+                            self.moments.clear();
                         }
                         1 => {
                             if let Some(config) = &self.config {
@@ -852,6 +853,8 @@ impl App {
                 KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
                     // Return to main menu instead of quit
                     self.screen = AppScreen::MainMenu;
+                    self.moments.clear();
+                    self.input.clear();
                     // self.should_quit = true;
                 }
                 _ => {}

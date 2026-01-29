@@ -32,6 +32,10 @@ choco install ffmpeg
 pip install yt-dlp
 
 # Or download from: https://github.com/yt-dlp/yt-dlp#installation
+
+# Also you can install directly from here V
+sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
 
 ### 3. Google Gemini API Key
@@ -113,6 +117,7 @@ The AI identifies moments in these categories:
 - **Funny**: Humorous or comedic moments
 - **Interesting**: Educational or thought-provoking content
 - **Incredible Play**: Amazing gameplay or skillful moments
+- **Cinematic**: Cinematic scene in game
 - **Other**: Notable moments that don't fit above categories
 
 ## 🛠️ Development
