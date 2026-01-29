@@ -1,6 +1,6 @@
 [package]
 name = "yt-shortmaker"
-version = "1.10.12"
+version = "1.10.13"
 edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["vicentefelipechile"]
