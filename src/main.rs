@@ -848,21 +848,25 @@ async fn run_processing(
     let _ = tx.send(AppMessage::Status(
         "Analyzing with Gemini AI...".to_string(),
     ));
-
-    let enabled_keys: Vec<String> = config
+    // Initialize Gemini Client
+    let enabled_keys: Vec<(String, String)> = config
         .google_api_keys
         .iter()
         .filter(|k| k.enabled)
-        .map(|k| k.value.clone())
+        .map(|k| (k.name.clone(), k.value.clone()))
         .collect();
 
     if enabled_keys.is_empty() {
-        let _ = tx.send(AppMessage::Error("No enabled API keys found!".to_string()));
-        let _ = tx.send(AppMessage::Finished);
+        let _ = tx.send(AppMessage::Error(
+            "No enabled API keys found. Please check settings.".to_string(),
+        ));
         return Ok((Vec::new(), None));
     }
 
     let gemini = GeminiClient::new(enabled_keys, config.use_fast_model);
+
+    // Iterate over chunks and analyze
+    let mut chunks_analyzed = 0;
 
     for (i, chunk) in video_chunks.iter().enumerate() {
         let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
@@ -876,33 +880,89 @@ async fn run_processing(
             video_chunks.len()
         )));
 
+        // Upload first
         match gemini.upload_video(&chunk.file_path).await {
-            Ok(file_uri) => match gemini.analyze_video(&file_uri, chunk.start_seconds).await {
-                Ok(moments) => {
-                    let _ = tx.send(AppMessage::Log(
-                        LogLevel::Info,
-                        format!("Chunk {}: Found {} moments", i + 1, moments.len()),
-                    ));
-                    for m in &moments {
-                        let _ = tx.send(AppMessage::MomentFound(m.clone()));
+            Ok(file_uri) => {
+                // Then analyze
+                match gemini.analyze_video(&file_uri, chunk.start_seconds).await {
+                    Ok(moments) => {
+                        chunks_analyzed += 1;
+                        let _ = tx.send(AppMessage::Log(
+                            LogLevel::Info,
+                            format!("Chunk {}: Found {} moments", i + 1, moments.len()),
+                        ));
+                        for m in &moments {
+                            let _ = tx.send(AppMessage::MomentFound(m.clone()));
+                        }
+                        all_moments.extend(moments);
+                        save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
                     }
-                    all_moments.extend(moments);
-                    save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        if err_msg.contains("No API keys available") {
+                            let _ = tx.send(AppMessage::Error(
+                                "API Keys Exhausted during analysis.".to_string(),
+                            ));
+                            break; // Stop processing chunks
+                        } else {
+                            let _ = tx.send(AppMessage::Log(
+                                LogLevel::Warning,
+                                format!("Chunk {} analysis failed: {}", i + 1, e),
+                            ));
+                        }
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.send(AppMessage::Log(
-                        LogLevel::Warning,
-                        format!("Chunk {} analysis failed: {}", i + 1, e),
-                    ));
-                }
-            },
+            }
             Err(e) => {
+                // If upload fails due to keys, we should also check
+                let err_msg = e.to_string();
+                if err_msg.contains("No active API keys") {
+                    let _ = tx.send(AppMessage::Error(
+                        "API Keys Exhausted during upload.".to_string(),
+                    ));
+                    break;
+                }
                 let _ = tx.send(AppMessage::Log(
                     LogLevel::Warning,
                     format!("Chunk {} upload failed: {}", i + 1, e),
                 ));
             }
         }
+    }
+
+    // Check if we found anything or if we should fallback
+    if all_moments.is_empty() && chunks_analyzed < video_chunks.len() {
+        // This implies we failed early or found nothing.
+        // If we broke due to keys, we should fallback.
+        // Since we don't track *why* we broke explicitly outside the loop easily,
+        // let's assume if moments is empty we try fallback.
+
+        let _ = tx.send(AppMessage::Status(
+            "Falling back to HQ Download...".to_string(),
+        ));
+        let _ = tx.send(AppMessage::Log(
+            LogLevel::Warning,
+            "Analysis incomplete or failed. Downloading full video.".to_string(),
+        ));
+
+        let video_id = extract_video_id(&url).unwrap_or("video".to_string());
+        let output_file = format!("{}/{}_full.mp4", config.default_output_dir, video_id);
+
+        video::download_high_res(
+            &url,
+            &output_file,
+            config.use_cookies,
+            &config.cookies_path,
+            None,
+        )
+        .await?;
+
+        let _ = tx.send(AppMessage::Complete(format!(
+            "Full video saved to: {}",
+            output_file
+        )));
+
+        return Ok((Vec::new(), Some(config.default_output_dir.clone())));
     }
 
     // Save final moments

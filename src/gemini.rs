@@ -6,14 +6,23 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::types::VideoMoment;
+
+/// API Key status tracker
+#[derive(Debug)]
+struct ClientKey {
+    name: String,
+    value: String,
+    enabled: AtomicBool,
+}
 
 /// Gemini API client
 pub struct GeminiClient {
     client: Client,
-    api_keys: Vec<String>,
+    api_keys: Vec<Arc<ClientKey>>,
     current_key_index: AtomicUsize,
     model: String,
 }
@@ -81,6 +90,8 @@ struct ContentPart {
 #[derive(Debug, Deserialize)]
 struct GeminiError {
     message: String,
+    code: Option<i32>,
+    status: Option<String>,
 }
 
 /// File upload response
@@ -146,30 +157,77 @@ struct TextPart {
 
 impl GeminiClient {
     /// Create a new Gemini client
-    pub fn new(api_keys: Vec<String>, use_fast_model: bool) -> Self {
+    pub fn new(api_keys: Vec<(String, String)>, use_fast_model: bool) -> Self {
         let model = if use_fast_model {
             "gemini-3-flash-preview".to_string()
         } else {
             "gemini-3-pro-preview".to_string()
         };
 
+        let keys = api_keys
+            .into_iter()
+            .map(|(name, value)| {
+                Arc::new(ClientKey {
+                    name,
+                    value,
+                    enabled: AtomicBool::new(true),
+                })
+            })
+            .collect();
+
         Self {
             client: Client::new(),
-            api_keys,
+            api_keys: keys,
             current_key_index: AtomicUsize::new(0),
             model,
         }
     }
 
-    /// Get the current active key and rotate to the next one for future requests
-    fn get_active_key(&self) -> &str {
+    /// Get the current active key and rotate to the next active one.
+    /// Checks if key is enabled.
+    fn get_active_key(&self) -> Option<Arc<ClientKey>> {
         if self.api_keys.is_empty() {
-            return "";
+            return None;
         }
-        // Get current index
-        let index = self.current_key_index.fetch_add(1, Ordering::SeqCst);
-        // Modulo to wrap around
-        &self.api_keys[index % self.api_keys.len()]
+
+        let start_index = self.current_key_index.load(Ordering::SeqCst);
+        let mut attempts = 0;
+        let total_keys = self.api_keys.len();
+
+        loop {
+            if attempts >= total_keys {
+                return None; // All keys disabled
+            }
+
+            let index = (start_index + attempts) % total_keys;
+            let key = &self.api_keys[index];
+
+            if key.enabled.load(Ordering::SeqCst) {
+                // Determine if we should rotate for next call (simple round robin among active)
+                // But for now, we just return the first active one we find starting from current index
+                return Some(key.clone());
+            }
+
+            attempts += 1;
+        }
+    }
+
+    /// Rotate to next key explicitly (e.g. after a success or before next request)
+    fn rotate_key(&self) {
+        self.current_key_index.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Disable the specified key
+    fn disable_key(&self, key_value: &str) {
+        if let Some(key) = self.api_keys.iter().find(|k| k.value == key_value) {
+            key.enabled.store(false, Ordering::SeqCst);
+            eprintln!(
+                "⚠️ WARN: API Key '{}' has been disabled due to errors.",
+                key.name
+            );
+        }
+        // Rotate immediately to avoid picking it up again in same loop if race condition
+        self.rotate_key();
     }
 
     /// Upload a video file to Gemini File API
@@ -184,7 +242,13 @@ impl GeminiClient {
         let file_size = file_content.len();
 
         // Step 1: Initiate resumable upload
-        let current_key = self.get_active_key();
+        // For upload, we just pick an active key. If it fails, we fail the upload for now.
+        // Implementing full failover for upload is possible but analysis is the critical part.
+        let key_arc = self
+            .get_active_key()
+            .ok_or_else(|| anyhow!("No active API keys available"))?;
+        let current_key = &key_arc.value;
+
         let init_url = format!(
             "https://generativelanguage.googleapis.com/upload/v1beta/files?key={}",
             current_key
@@ -233,15 +297,20 @@ impl GeminiClient {
         // Wait for file to be processed
         let file_uri = self.wait_for_file_active(&upload_result.file.name).await?;
 
+        // Rotate key after successful heavy operation
+        self.rotate_key();
+
         Ok(file_uri)
     }
 
     /// Wait for uploaded file to become active
     async fn wait_for_file_active(&self, file_name: &str) -> Result<String> {
-        // We use the same key for checking status as we might want consistency,
-        // but rotation is fine too as they are global resources.
-        // Let's rotate to avoid hitting limits on check loops.
-        let current_key = self.get_active_key();
+        // We use the same key mechanism
+        let key_arc = self
+            .get_active_key()
+            .ok_or_else(|| anyhow!("No active API keys available"))?;
+        let current_key = &key_arc.value;
+
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/{}?key={}",
             file_name, current_key
@@ -276,14 +345,7 @@ impl GeminiClient {
         file_uri: &str,
         chunk_start_offset: u64,
     ) -> Result<Vec<VideoMoment>> {
-        let current_key = self.get_active_key();
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, current_key
-        );
-
         // Construct the JSON Schema for structured output
-        // Based on request_example.txt
         let response_schema = ResponseSchema {
             schema_type: "object".to_string(),
             properties: serde_json::json!({
@@ -339,83 +401,152 @@ impl GeminiClient {
                 }],
             },
             generation_config: GenerationConfig {
-                temperature: Some(0.4), // Slightly creative but focused
+                temperature: Some(0.4),
                 response_mime_type: "application/json".to_string(),
                 response_schema: Some(response_schema),
                 media_resolution: Some("MEDIA_RESOLUTION_LOW".to_string()),
             },
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to call Gemini API")?;
+        // Retry loop for API keys
+        loop {
+            // Get a key
+            let (key_value, key_name) = match self.get_active_key() {
+                Some(k) => (k.value.clone(), k.name.clone()),
+                None => return Err(anyhow!("No API keys available")),
+            };
 
-        let gemini_response: GeminiResponse = response
-            .json()
-            .await
-            .context("Failed to parse Gemini response")?;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+                self.model, key_value
+            );
 
-        if let Some(error) = gemini_response.error {
-            return Err(anyhow!("Gemini API error: {}", error.message));
-        }
+            let response_result = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&request)
+                .send()
+                .await;
 
-        let text = gemini_response
-            .candidates
-            .and_then(|c| c.into_iter().next())
-            .and_then(|c| c.content.parts.into_iter().next())
-            .and_then(|p| p.text)
-            .ok_or_else(|| anyhow!("No response from Gemini"))?;
+            match response_result {
+                Ok(response) => {
+                    let gemini_response: GeminiResponse = match response.json().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // JSON parse error might mean weird response text or server error
+                            eprintln!("Failed to parse Gemini response: {}", e);
+                            self.rotate_key(); // Try next key just in case
+                            continue;
+                        }
+                    };
 
-        #[derive(Deserialize)]
-        struct AnalysisResponse {
-            moments: Vec<VideoMoment>,
-        }
+                    if let Some(error) = gemini_response.error {
+                        // Check for 429 or similar
+                        // 429 Resource Exhausted
+                        // code 429 or status "RESOURCE_EXHAUSTED"
+                        let is_limit = error.code == Some(429)
+                            || error.status.as_deref() == Some("RESOURCE_EXHAUSTED")
+                            || error.message.contains("quota");
 
-        let cleaned = text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
+                        if is_limit {
+                            self.disable_key(&key_value);
+                            eprintln!(
+                                "Disabling key {} due to quota limit: {}",
+                                key_name, error.message
+                            );
+                            continue; // Retry loop will pick next key
+                        } else {
+                            // Other error
+                            return Err(anyhow!("Gemini API error: {}", error.message));
+                        }
+                    }
 
-        let analysis_response: AnalysisResponse =
-            serde_json::from_str(cleaned).context("Failed to parse structured moments JSON")?;
+                    match gemini_response
+                        .candidates
+                        .and_then(|c| c.into_iter().next())
+                        .and_then(|c| c.content.parts.into_iter().next())
+                        .and_then(|p| p.text)
+                    {
+                        Some(text) => {
+                            let cleaning = text
+                                .trim()
+                                .trim_start_matches("```json")
+                                .trim_start_matches("```")
+                                .trim_end_matches("```")
+                                .trim();
 
-        let mut moments = analysis_response.moments;
+                            #[derive(Deserialize)]
+                            struct AnalysisResponse {
+                                moments: Vec<VideoMoment>,
+                            }
 
-        // Adjust timestamps based on chunk offset
-        if chunk_start_offset > 0 {
-            for moment in moments.iter_mut() {
-                let start_secs = crate::video::parse_timestamp_to_seconds(&moment.start_time)
-                    .unwrap_or(0)
-                    + chunk_start_offset;
-                let end_secs = crate::video::parse_timestamp_to_seconds(&moment.end_time)
-                    .unwrap_or(0)
-                    + chunk_start_offset;
+                            if let Ok(analysis_response) =
+                                serde_json::from_str::<AnalysisResponse>(cleaning)
+                            {
+                                let mut moments = analysis_response.moments;
+                                // Adjust timestamps
+                                if chunk_start_offset > 0 {
+                                    for moment in moments.iter_mut() {
+                                        let start_secs = crate::video::parse_timestamp_to_seconds(
+                                            &moment.start_time,
+                                        )
+                                        .unwrap_or(0)
+                                            + chunk_start_offset;
+                                        let end_secs = crate::video::parse_timestamp_to_seconds(
+                                            &moment.end_time,
+                                        )
+                                        .unwrap_or(0)
+                                            + chunk_start_offset;
 
-                moment.start_time = crate::video::format_seconds_to_timestamp(start_secs);
-                moment.end_time = crate::video::format_seconds_to_timestamp(end_secs);
+                                        moment.start_time =
+                                            crate::video::format_seconds_to_timestamp(start_secs);
+                                        moment.end_time =
+                                            crate::video::format_seconds_to_timestamp(end_secs);
 
-                // Adjust dialogue timestamps too if present
-                for dia in &mut moment.dialogue {
-                    let d_start = crate::video::parse_timestamp_to_seconds(&dia.start_time)
-                        .unwrap_or(0)
-                        + chunk_start_offset;
-                    let d_end = crate::video::parse_timestamp_to_seconds(&dia.end_time)
-                        .unwrap_or(0)
-                        + chunk_start_offset;
-                    dia.start_time = crate::video::format_seconds_to_timestamp(d_start);
-                    dia.end_time = crate::video::format_seconds_to_timestamp(d_end);
+                                        for dia in &mut moment.dialogue {
+                                            let d_start = crate::video::parse_timestamp_to_seconds(
+                                                &dia.start_time,
+                                            )
+                                            .unwrap_or(0)
+                                                + chunk_start_offset;
+                                            let d_end = crate::video::parse_timestamp_to_seconds(
+                                                &dia.end_time,
+                                            )
+                                            .unwrap_or(0)
+                                                + chunk_start_offset;
+                                            dia.start_time =
+                                                crate::video::format_seconds_to_timestamp(d_start);
+                                            dia.end_time =
+                                                crate::video::format_seconds_to_timestamp(d_end);
+                                        }
+                                    }
+                                }
+                                self.rotate_key(); // Success, rotate for next time
+                                return Ok(moments);
+                            } else {
+                                // Parse error
+                                eprintln!("Failed to parse structured moments JSON");
+                                self.rotate_key();
+                                continue;
+                            }
+                        }
+                        None => {
+                            // Empty response
+                            return Err(anyhow!("No response content from Gemini"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Network error (timeout, etc)
+                    // We assume timeout might be key related or transient?
+                    // Usually timeouts are not key related, but let's try next key.
+                    eprintln!("Network error with key {}: {}", key_name, e);
+                    self.rotate_key();
+                    continue;
                 }
             }
         }
-
-        Ok(moments)
     }
 }
 
