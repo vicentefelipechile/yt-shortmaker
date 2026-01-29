@@ -200,19 +200,41 @@ pub async fn download_high_res(
 
     args.push(url);
 
-    let output = Command::new("yt-dlp")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to execute yt-dlp")?;
+    let mut attempt = 1;
+    let max_retries = 3;
 
-    if !output.status.success() {
+    loop {
+        let output = Command::new("yt-dlp")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to execute yt-dlp")?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("yt-dlp failed: {}", stderr.trim()));
-    }
 
-    Ok(())
+        if attempt >= max_retries {
+            return Err(anyhow!(
+                "yt-dlp failed after {} attempts: {}",
+                max_retries,
+                stderr.trim()
+            ));
+        }
+
+        eprintln!(
+            "HD download failed (Attempt {}/{}). Retrying in 30 seconds... Error: {}",
+            attempt,
+            max_retries,
+            stderr.trim()
+        );
+
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        attempt += 1;
+    }
 }
 
 /// Calculate video chunks for processing
