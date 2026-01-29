@@ -168,7 +168,8 @@ pub async fn download_high_res(
     cookies_path: &str,
     custom_format: Option<String>,
 ) -> Result<()> {
-    let default_format = "bestvideo+bestaudio/best".to_string();
+    let default_format =
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best".to_string();
     let format = custom_format.unwrap_or(default_format);
 
     let mut args = vec![
@@ -255,17 +256,51 @@ pub async fn split_video(
         let start_time = format_seconds_to_timestamp(*start);
         let duration_time = duration.to_string();
 
-        let output = Command::new("ffmpeg")
+        // Step 1: Split with -c copy (fastest, preserves video structure)
+        // We use a temporary MKV file for the split to better handle timestamps
+        let temp_chunk_path = format!("{}/temp_chunk_{}.mkv", output_dir, i);
+
+        let split_output = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                &start_time,
+                "-i",
+                input_path,
+                "-t",
+                &duration_time,
+                "-c",
+                "copy",
+                "-y",
+                &temp_chunk_path,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to execute ffmpeg for splitting (step 1)")?;
+
+        if !split_output.status.success() {
+            let stderr = String::from_utf8_lossy(&split_output.stderr);
+            // Clean up if failed
+            let _ = std::fs::remove_file(&temp_chunk_path);
+            return Err(anyhow!(
+                "ffmpeg split failed for chunk {}: {}",
+                i,
+                stderr.trim()
+            ));
+        }
+
+        // Step 2: Re-encode audio to AAC to ensure compatibility
+        // Read from temp_chunk_path, write to chunk_path
+        let transcode_output = Command::new("ffmpeg")
             .args([
                 "-hide_banner",
                 "-loglevel",
                 "error",
                 "-i",
-                input_path,
-                "-ss",
-                &start_time,
-                "-t",
-                &duration_time,
+                &temp_chunk_path,
                 "-c:v",
                 "copy",
                 "-c:a",
@@ -276,12 +311,15 @@ pub async fn split_video(
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
-            .context("Failed to execute ffmpeg for splitting")?;
+            .context("Failed to execute ffmpeg for audio transcoding (step 2)")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        // Always try to remove temp file
+        let _ = std::fs::remove_file(&temp_chunk_path);
+
+        if !transcode_output.status.success() {
+            let stderr = String::from_utf8_lossy(&transcode_output.stderr);
             return Err(anyhow!(
-                "ffmpeg split failed for chunk {}: {}",
+                "ffmpeg audio transcode failed for chunk {}: {}",
                 i,
                 stderr.trim()
             ));
@@ -314,34 +352,68 @@ pub async fn extract_clip(
 
     let duration = end_sec - start_sec;
 
-    let args = vec![
+    let temp_output_path = format!("{}.temp.mkv", output_path);
+
+    // Step 1: Extract with -c copy (fastest, preserves video structure)
+    let split_args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
-        "-ss".to_string(), // Fast seeking (before -i)
+        "-ss".to_string(),
         start_time.to_string(),
         "-i".to_string(),
         source_path.to_string(),
-        "-t".to_string(), // Duration
+        "-t".to_string(),
         duration.to_string(),
-        "-c".to_string(), // Stream copy (no re-encoding)
+        "-c".to_string(),
         "copy".to_string(),
-        "-map".to_string(), // Copy all streams
+        "-map".to_string(),
         "0".to_string(),
-        "-y".to_string(), // Overwrite output
-        output_path.to_string(),
+        "-y".to_string(),
+        temp_output_path.clone(),
     ];
 
-    let output = Command::new("ffmpeg")
-        .args(&args)
+    let split_output = Command::new("ffmpeg")
+        .args(&split_args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .context("Failed to execute ffmpeg for extraction")?;
+        .context("Failed to execute ffmpeg for extraction (step 1)")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !split_output.status.success() {
+        let stderr = String::from_utf8_lossy(&split_output.stderr);
+        let _ = std::fs::remove_file(&temp_output_path); // Cleanup
         return Err(anyhow!("ffmpeg extraction failed: {}", stderr.trim()));
+    }
+
+    // Step 2: Re-encode audio to AAC to ensure compatibility
+    let transcode_args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-i".to_string(),
+        temp_output_path.clone(),
+        "-c:v".to_string(),
+        "copy".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-y".to_string(),
+        output_path.to_string(),
+    ];
+
+    let transcode_output = Command::new("ffmpeg")
+        .args(&transcode_args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to execute ffmpeg for audio transcoding (step 2)")?;
+
+    // Cleanup temp file
+    let _ = std::fs::remove_file(&temp_output_path);
+
+    if !transcode_output.status.success() {
+        let stderr = String::from_utf8_lossy(&transcode_output.stderr);
+        return Err(anyhow!("ffmpeg audio transcode failed: {}", stderr.trim()));
     }
 
     Ok(())
