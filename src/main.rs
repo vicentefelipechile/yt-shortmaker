@@ -883,51 +883,41 @@ async fn run_processing(
         )));
 
         // Upload first
-        match gemini.upload_video(&chunk.file_path).await {
-            Ok(file_uri) => {
-                // Then analyze
-                match gemini.analyze_video(&file_uri, chunk.start_seconds).await {
-                    Ok(moments) => {
-                        chunks_analyzed += 1;
-                        let _ = tx.send(AppMessage::Log(
-                            LogLevel::Info,
-                            format!("Chunk {}: Found {} moments", i + 1, moments.len()),
-                        ));
-                        for m in &moments {
-                            let _ = tx.send(AppMessage::MomentFound(m.clone()));
-                        }
-                        all_moments.extend(moments);
-                        save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
-                    }
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        if err_msg.contains("No API keys available") {
-                            let _ = tx.send(AppMessage::Error(
-                                "API Keys Exhausted during analysis.".to_string(),
-                            ));
-                            break; // Stop processing chunks
-                        } else {
-                            let _ = tx.send(AppMessage::Log(
-                                LogLevel::Warning,
-                                format!("Chunk {} analysis failed: {}", i + 1, e),
-                            ));
-                        }
-                    }
+        // Process chunk with sticky session (Upload + Analyze)
+        let tx_clone = tx.clone();
+        let status_cb = move |msg: String| {
+            let _ = tx_clone.send(AppMessage::Status(msg));
+        };
+
+        match gemini
+            .process_chunk(&chunk.file_path, chunk.start_seconds, status_cb)
+            .await
+        {
+            Ok(moments) => {
+                chunks_analyzed += 1;
+                let _ = tx.send(AppMessage::Log(
+                    LogLevel::Info,
+                    format!("Chunk {}: Found {} moments", i + 1, moments.len()),
+                ));
+                for m in &moments {
+                    let _ = tx.send(AppMessage::MomentFound(m.clone()));
                 }
+                all_moments.extend(moments);
+                save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
             }
             Err(e) => {
-                // If upload fails due to keys, we should also check
                 let err_msg = e.to_string();
-                if err_msg.contains("No active API keys") {
+                if err_msg.contains("No API keys available") {
                     let _ = tx.send(AppMessage::Error(
-                        "API Keys Exhausted during upload.".to_string(),
+                        "API Keys Exhausted during analysis.".to_string(),
                     ));
                     break;
+                } else {
+                    let _ = tx.send(AppMessage::Log(
+                        LogLevel::Warning,
+                        format!("Chunk {} analysis failed: {}", i + 1, e),
+                    ));
                 }
-                let _ = tx.send(AppMessage::Log(
-                    LogLevel::Warning,
-                    format!("Chunk {} upload failed: {}", i + 1, e),
-                ));
             }
         }
     }
