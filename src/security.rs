@@ -182,3 +182,53 @@ fn derive_key(password: &[u8], salt: &SaltString) -> Result<[u8; 32]> {
 
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_encryption() {
+        let content = r#"{"key": "value"}"#.to_string();
+        let secured = SecuredConfig::new(content.clone(), EncryptionMode::Simple, None).unwrap();
+
+        assert_eq!(secured.mode, EncryptionMode::Simple);
+        assert_ne!(secured.data, content); // Should be encrypted
+
+        let decrypted = secured.decrypt(None).unwrap();
+        assert_eq!(decrypted.content, content);
+        assert_eq!(decrypted.mode, EncryptionMode::Simple);
+    }
+
+    #[test]
+    fn test_password_encryption() {
+        let content = r#"{"secret": "data"}"#.to_string();
+        let password = "my-secure-password";
+        let secured =
+            SecuredConfig::new(content.clone(), EncryptionMode::Password, Some(password)).unwrap();
+
+        assert_eq!(secured.mode, EncryptionMode::Password);
+        assert!(secured.salt.is_some());
+        assert_ne!(secured.data, content);
+
+        // Correct password
+        let decrypted = secured.decrypt(Some(password)).unwrap();
+        assert_eq!(decrypted.content, content);
+
+        // Wrong password
+        let result = secured.decrypt(Some("wrong-password"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_none_mode() {
+        let content = r#"{"plain": "text"}"#.to_string();
+        let secured = SecuredConfig::new(content.clone(), EncryptionMode::None, None).unwrap();
+
+        assert_eq!(secured.mode, EncryptionMode::None);
+        assert_eq!(secured.data, content);
+
+        let decrypted = secured.decrypt(None).unwrap();
+        assert_eq!(decrypted.content, content);
+    }
+}

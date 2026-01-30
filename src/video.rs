@@ -59,8 +59,19 @@ pub fn check_dependencies() -> Result<()> {
     Ok(())
 }
 
+use crate::config::AppConfig;
+
 /// Check if NVENC (NVIDIA Hardware Encoding) is available
 pub fn check_nvenc_availability() -> bool {
+    // First check user config
+    if let Ok(config) = AppConfig::load() {
+        if let Some(enabled) = config.gpu_acceleration {
+            if !enabled {
+                return false;
+            }
+        }
+    }
+
     // Run ffmpeg -encoders and look for h264_nvenc
     let output = Command::new("ffmpeg")
         .args(["-hide_banner", "-encoders"])
@@ -272,30 +283,56 @@ pub async fn split_video(
     // Ensure output directory exists
     std::fs::create_dir_all(output_dir)?;
 
+    // Check for NVENC availability once (it respects config now)
+    let use_nvenc = check_nvenc_availability();
+
     for (i, (start, duration)) in chunks.iter().enumerate() {
         let chunk_path = format!("{}/chunk_{}.mp4", output_dir, i);
 
         let start_time = format_seconds_to_timestamp(*start);
         let duration_time = duration.to_string();
 
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-ss".to_string(),
+            start_time.clone(),
+            "-i".to_string(),
+            input_path.to_string(),
+            "-t".to_string(),
+            duration_time.clone(),
+        ];
+
+        if use_nvenc {
+            args.extend_from_slice(&[
+                "-c:v".to_string(),
+                "h264_nvenc".to_string(),
+                "-preset".to_string(),
+                "p4".to_string(), // High quality preset
+                "-cq".to_string(),
+                "23".to_string(),
+                "-c:a".to_string(),
+                "aac".to_string(),
+            ]);
+        } else {
+            args.extend_from_slice(&[
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-crf".to_string(),
+                "23".to_string(),
+                "-c:a".to_string(),
+                "aac".to_string(),
+            ]);
+        }
+
+        args.push("-y".to_string());
+        args.push(chunk_path.clone());
+
         let output = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &start_time,
-                "-i",
-                input_path,
-                "-t",
-                &duration_time,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-y",
-                &chunk_path,
-            ])
+            .args(&args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
@@ -325,7 +362,7 @@ pub async fn extract_clip(
     start_time: &str,
     end_time: &str,
     output_path: &str,
-    _use_gpu: bool, // Parameter kept for API compatibility, but ignored for stream copy
+    use_gpu: bool, // Parameter kept for API compatibility, but ignored for stream copy
 ) -> Result<()> {
     // Calculate duration for -t argument
     let start_sec = parse_timestamp_to_seconds(start_time).context("Failed to parse start time")?;
@@ -337,7 +374,11 @@ pub async fn extract_clip(
 
     let duration = end_sec - start_sec;
 
-    let args = vec![
+    // Check for NVENC availability
+    // Optimization: if use_gpu is explicitly false, don't check availability
+    let use_nvenc = use_gpu && check_nvenc_availability();
+
+    let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
@@ -347,15 +388,38 @@ pub async fn extract_clip(
         source_path.to_string(),
         "-t".to_string(),
         duration.to_string(),
-        "-c:v".to_string(),
-        "copy".to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-map".to_string(),
-        "0".to_string(),
-        "-y".to_string(),
-        output_path.to_string(),
     ];
+
+    if use_nvenc {
+        args.extend_from_slice(&[
+            "-c:v".to_string(),
+            "h264_nvenc".to_string(),
+            "-preset".to_string(),
+            "p4".to_string(),
+            "-cq".to_string(),
+            "23".to_string(),
+            "-c:a".to_string(),
+            "aac".to_string(),
+        ]);
+    } else {
+        args.extend_from_slice(&[
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-preset".to_string(),
+            "fast".to_string(),
+            "-crf".to_string(),
+            "23".to_string(),
+            "-c:a".to_string(),
+            "aac".to_string(),
+        ]);
+    }
+
+    // Force map 0 to ensure we get video and audio
+    args.push("-map".to_string());
+    args.push("0".to_string());
+
+    args.push("-y".to_string());
+    args.push(output_path.to_string());
 
     let output = Command::new("ffmpeg")
         .args(&args)
