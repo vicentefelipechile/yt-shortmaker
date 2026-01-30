@@ -320,9 +320,7 @@ pub async fn split_video(
                 "-c:v".to_string(),
                 "libx264".to_string(),
                 "-preset".to_string(),
-                "fast".to_string(),
-                "-crf".to_string(),
-                "23".to_string(),
+                "superfast".to_string(),
                 "-c:a".to_string(),
                 "aac".to_string(),
             ]);
@@ -406,17 +404,11 @@ pub async fn extract_clip(
             "-c:v".to_string(),
             "libx264".to_string(),
             "-preset".to_string(),
-            "fast".to_string(),
-            "-crf".to_string(),
-            "23".to_string(),
+            "superfast".to_string(),
             "-c:a".to_string(),
             "aac".to_string(),
         ]);
     }
-
-    // Force map 0 to ensure we get video and audio
-    args.push("-map".to_string());
-    args.push("0".to_string());
 
     args.push("-y".to_string());
     args.push(output_path.to_string());

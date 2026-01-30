@@ -30,8 +30,13 @@ rust_i18n::i18n!("locales");
 use types::{SessionState, VideoMoment};
 use video::extract_video_id;
 
+use crate::types::APP_VERSION;
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // No CLI commands, run TUI mode
+    println!("Abriendo, por favor espera... 🥺 ({})", APP_VERSION);
+
     // Add local bin to PATH immediately
     setup::add_to_process_path(&setup::get_bin_dir());
 
@@ -59,7 +64,6 @@ async fn main() -> Result<()> {
         return handle_cli_command(&actual_args).await;
     }
 
-    // No CLI commands, run TUI mode
     // Run setup wizard first
     setup::run_setup_wizard().await?;
 
