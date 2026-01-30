@@ -657,12 +657,17 @@ impl App {
                     }
                 }
                 KeyCode::Down => {
-                    if self.language_index < 1 {
+                    if self.language_index < 2 {
                         self.language_index += 1;
                     }
                 }
                 KeyCode::Enter => {
-                    let new_lang = if self.language_index == 0 { "en" } else { "es" };
+                    let new_lang = match self.language_index {
+                        0 => "en",
+                        1 => "es",
+                        2 => "ru",
+                        _ => "en",
+                    };
                     rust_i18n::set_locale(new_lang);
                     if let Some(config) = &mut self.config {
                         config.language = new_lang.to_string();
@@ -700,7 +705,11 @@ impl App {
                         }
                         1 => {
                             if let Some(config) = &self.config {
-                                self.language_index = if config.language == "es" { 1 } else { 0 };
+                                self.language_index = match config.language.as_str() {
+                                    "es" => 1,
+                                    "ru" => 2,
+                                    _ => 0,
+                                };
                             }
                             self.screen = AppScreen::LanguageMenu;
                         }
@@ -1817,13 +1826,13 @@ fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    let options = ["English", "Español"];
+    let options = ["English", "Español", "Русский"];
 
     let list_area = Rect {
         x: area.width / 2 - 10,
         y: area.height / 2 - 3,
         width: 20,
-        height: 6,
+        height: 7,
     };
 
     let list_area = list_area.intersection(inner_area);
