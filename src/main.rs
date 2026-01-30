@@ -21,7 +21,12 @@ use simplelog::{Config, LevelFilter, WriteLogger};
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
+
 use tui::{App, AppMessage, AppScreen, LogLevel, TuiSender};
 
 // Init translations
@@ -624,6 +629,10 @@ async fn run_app(
                         format!("{}/temp.json", config_clone.default_output_dir);
                     let custom_format_clone = custom_format.clone();
                     let existing_moments = all_moments.clone();
+                    let cancellation_token = app.cancellation_token.clone();
+
+                    // Reset token before starting
+                    cancellation_token.store(false, Ordering::Relaxed);
 
                     tokio::spawn(async move {
                         let result = run_processing(
@@ -634,6 +643,7 @@ async fn run_app(
                             temp_json_path_clone,
                             custom_format_clone,
                             existing_moments,
+                            cancellation_token,
                         )
                         .await;
 
@@ -669,6 +679,10 @@ async fn run_app(
                             format!("{}/temp.json", config_clone.default_output_dir);
                         let custom_format_clone = custom_format.clone();
                         let moments_clone = app.moments.clone();
+                        let cancellation_token = app.cancellation_token.clone();
+
+                        // Reset token
+                        cancellation_token.store(false, Ordering::Relaxed);
 
                         // We go back to processing screen to show progress
                         app.screen = AppScreen::Processing;
@@ -682,6 +696,7 @@ async fn run_app(
                                 temp_json_path_clone,
                                 custom_format_clone,
                                 moments_clone,
+                                cancellation_token,
                             )
                             .await;
 
@@ -762,6 +777,7 @@ async fn run_processing(
     temp_json_path: String,
     custom_format: Option<String>,
     mut all_moments: Vec<VideoMoment>,
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Ensure output directory exists
     config.ensure_output_dir()?;
@@ -875,6 +891,17 @@ async fn run_processing(
     let mut chunks_analyzed = 0;
 
     for (i, chunk) in video_chunks.iter().enumerate() {
+        // Check cancellation
+        if cancellation_token.load(Ordering::Relaxed) {
+            let _ = tx.send(AppMessage::Status("Cancelled".to_string()));
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Warning,
+                "Processing cancelled by user".to_string(),
+            ));
+            // Return early - preserve temp dir
+            return Ok((Vec::new(), None));
+        }
+
         let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
         let _ = tx.send(AppMessage::Progress(
             progress,
@@ -1010,6 +1037,7 @@ async fn run_processing(
         temp_json_path,
         custom_format,
         all_moments,
+        cancellation_token,
     )
     .await
 }
@@ -1023,6 +1051,7 @@ async fn run_extraction(
     temp_json_path: String,
     custom_format: Option<String>,
     all_moments: Vec<VideoMoment>,
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Download high-res
     let _ = tx.send(AppMessage::Status(
@@ -1059,6 +1088,16 @@ async fn run_extraction(
 
     let total_clips = all_moments.len();
     for (i, moment) in all_moments.iter().enumerate() {
+        if cancellation_token.load(Ordering::Relaxed) {
+            let _ = tx.send(AppMessage::Status("Cancelled".to_string()));
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Warning,
+                "Extraction cancelled by user".to_string(),
+            ));
+            // Return early - return whatever we created so far
+            return Ok((all_moments, Some(shorts_dir)));
+        }
+
         let progress = 0.9 + (0.1 * (i as f64 / total_clips as f64));
         let _ = tx.send(AppMessage::Progress(
             progress,

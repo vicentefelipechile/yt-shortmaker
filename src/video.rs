@@ -404,7 +404,7 @@ pub async fn extract_clip(
             "-c:v".to_string(),
             "libx264".to_string(),
             "-preset".to_string(),
-            "superfast".to_string(),
+            "ultrafast".to_string(),
             "-c:a".to_string(),
             "aac".to_string(),
         ]);

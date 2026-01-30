@@ -2,6 +2,10 @@
 //! Built with Ratatui for a rich interactive experience
 
 use std::io::{self, Stdout};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -91,6 +95,8 @@ pub enum AppScreen {
     PasswordInput,
     /// Language Selection Menu
     LanguageMenu,
+    /// Confirmation for cancelling processing
+    ProcessingCancelConfirm,
 }
 
 /// Log entry
@@ -178,6 +184,9 @@ pub struct App {
     // -- API Key Manager State --
     /// Index for API key list selection
     pub api_keys_index: usize,
+
+    /// Cancellation token for background tasks
+    pub cancellation_token: Arc<AtomicBool>,
 }
 
 impl App {
@@ -213,6 +222,7 @@ impl App {
             setting_input: String::new(),
             settings_items: Vec::new(),
             api_keys_index: 0,
+            cancellation_token: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -854,7 +864,18 @@ impl App {
             },
             AppScreen::Processing => match key {
                 KeyCode::Char('q') | KeyCode::Esc => {
-                    self.screen = AppScreen::MainMenu;
+                    self.screen = AppScreen::ProcessingCancelConfirm;
+                }
+                _ => {}
+            },
+            AppScreen::ProcessingCancelConfirm => match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.cancellation_token.store(true, Ordering::Relaxed);
+                    self.screen = AppScreen::Processing; // Go back to processing to wait for task to finish cleanup
+                    self.log(LogLevel::Warning, "Cancelling...".to_string());
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.screen = AppScreen::Processing;
                 }
                 _ => {}
             },
@@ -1021,6 +1042,7 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::SecuritySetup => render_security_setup(frame, app, area),
         AppScreen::PasswordInput => render_password_input(frame, app, area),
         AppScreen::LanguageMenu => render_language_menu(frame, app, area),
+        AppScreen::ProcessingCancelConfirm => render_processing_cancel_confirm(frame, area),
     }
 }
 
@@ -1887,4 +1909,51 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             .as_ref(),
         )
         .split(popup_layout[1])[1]
+}
+
+fn render_processing_cancel_confirm(frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(format!(" 🛑 {} ", rust_i18n::t!("cancel_title")));
+
+    let area = centered_rect(50, 40, area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints(
+            [
+                Constraint::Length(3), // Msg
+                Constraint::Min(4),    // Warning
+                Constraint::Length(3), // Options
+            ]
+            .as_ref(),
+        )
+        .split(area);
+
+    let msg = Paragraph::new(rust_i18n::t!("cancel_msg"))
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(msg, chunks[0]);
+
+    let warn = Paragraph::new(rust_i18n::t!("cancel_warn"))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(warn, chunks[1]);
+
+    let options = Text::from(vec![
+        Line::from(rust_i18n::t!("cancel_yes")).style(Style::default().fg(Color::Red)),
+        Line::from(""),
+        Line::from(rust_i18n::t!("cancel_no")).style(Style::default().fg(Color::Green)),
+    ]);
+
+    let opts = Paragraph::new(options).alignment(Alignment::Center);
+    frame.render_widget(opts, chunks[2]);
 }
