@@ -113,6 +113,7 @@ pub enum SettingType {
     String,
     Bool,
     Float,
+    Enum(Vec<String>),
 }
 
 /// Definition of a setting to be edited
@@ -286,6 +287,16 @@ impl App {
                     kind: SettingType::Bool,
                     description: "Use faster model (gemini-3-flash)".to_string(),
                 },
+                SettingItem {
+                    name: "AI Provider".to_string(),
+                    key: "provider".to_string(),
+                    value: match config.active_provider {
+                        crate::config::AiProviderType::Google => "Google".to_string(),
+                        crate::config::AiProviderType::OpenRouter => "OpenRouter".to_string(),
+                    },
+                    kind: SettingType::Enum(vec!["Google".to_string(), "OpenRouter".to_string()]),
+                    description: "Select AI Provider (Google Gemini or OpenRouter)".to_string(),
+                },
             ];
         }
     }
@@ -310,6 +321,12 @@ impl App {
                     }
                     "zoom" => config.shorts_config.main_video_zoom = val.parse().unwrap_or(0.7),
                     "fast_model" => config.use_fast_model = val.parse().unwrap_or(true),
+                    "provider" => {
+                        config.active_provider = match val.as_str() {
+                            "OpenRouter" => crate::config::AiProviderType::OpenRouter,
+                            _ => crate::config::AiProviderType::Google,
+                        }
+                    }
                     _ => {}
                 }
 
@@ -407,9 +424,13 @@ impl App {
                 }
                 KeyCode::Down => {
                     if let Some(config) = &self.config {
-                        if !config.google_api_keys.is_empty()
-                            && self.api_keys_index < config.google_api_keys.len() - 1
-                        {
+                        let len = match config.active_provider {
+                            crate::config::AiProviderType::OpenRouter => {
+                                config.openrouter_api_keys.len()
+                            }
+                            _ => config.google_api_keys.len(),
+                        };
+                        if len > 0 && self.api_keys_index < len - 1 {
                             self.api_keys_index += 1;
                         }
                     }
@@ -421,17 +442,29 @@ impl App {
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     if let Some(config) = &self.config {
-                        if !config.google_api_keys.is_empty() {
+                        let keys = match config.active_provider {
+                            crate::config::AiProviderType::OpenRouter => {
+                                &config.openrouter_api_keys
+                            }
+                            _ => &config.google_api_keys,
+                        };
+                        if !keys.is_empty() {
                             self.screen = AppScreen::ApiKeyRename;
-                            self.input = config.google_api_keys[self.api_keys_index].name.clone();
+                            self.input = keys[self.api_keys_index].name.clone();
                             self.cursor_pos = self.input.len();
                         }
                     }
                 }
                 KeyCode::Char(' ') => {
                     if let Some(config) = &mut self.config {
-                        if !config.google_api_keys.is_empty() {
-                            let enabled = &mut config.google_api_keys[self.api_keys_index].enabled;
+                        let keys = match config.active_provider {
+                            crate::config::AiProviderType::OpenRouter => {
+                                &mut config.openrouter_api_keys
+                            }
+                            _ => &mut config.google_api_keys,
+                        };
+                        if !keys.is_empty() {
+                            let enabled = &mut keys[self.api_keys_index].enabled;
                             *enabled = !*enabled;
                             let _ = config.save();
                         }
@@ -439,11 +472,15 @@ impl App {
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     if let Some(config) = &mut self.config {
-                        if !config.google_api_keys.is_empty() {
-                            config.google_api_keys.remove(self.api_keys_index);
-                            if self.api_keys_index > 0
-                                && self.api_keys_index >= config.google_api_keys.len()
-                            {
+                        let keys = match config.active_provider {
+                            crate::config::AiProviderType::OpenRouter => {
+                                &mut config.openrouter_api_keys
+                            }
+                            _ => &mut config.google_api_keys,
+                        };
+                        if !keys.is_empty() {
+                            keys.remove(self.api_keys_index);
+                            if self.api_keys_index > 0 && self.api_keys_index >= keys.len() {
                                 self.api_keys_index -= 1;
                             }
                             let _ = config.save();
@@ -459,9 +496,16 @@ impl App {
                 KeyCode::Enter => {
                     if !self.input.trim().is_empty() {
                         if let Some(config) = &mut self.config {
-                            config.google_api_keys.push(crate::config::ApiKey {
+                            let (keys, prefix) = match config.active_provider {
+                                crate::config::AiProviderType::OpenRouter => {
+                                    (&mut config.openrouter_api_keys, "OpenRouter Key")
+                                }
+                                _ => (&mut config.google_api_keys, "Gemini Key"),
+                            };
+
+                            keys.push(crate::config::ApiKey {
                                 value: self.input.trim().to_string(),
-                                name: format!("Gemini Key {}", config.google_api_keys.len() + 1),
+                                name: format!("{} {}", prefix, keys.len() + 1),
                                 enabled: true,
                             });
                             if let Err(e) = config.save() {
@@ -510,9 +554,16 @@ impl App {
                 KeyCode::Enter => {
                     if !self.input.trim().is_empty() {
                         if let Some(config) = &mut self.config {
-                            config.google_api_keys[self.api_keys_index].name =
-                                self.input.trim().to_string();
-                            let _ = config.save();
+                            let keys = match config.active_provider {
+                                crate::config::AiProviderType::OpenRouter => {
+                                    &mut config.openrouter_api_keys
+                                }
+                                _ => &mut config.google_api_keys,
+                            };
+                            if !keys.is_empty() && self.api_keys_index < keys.len() {
+                                keys[self.api_keys_index].name = self.input.trim().to_string();
+                                let _ = config.save();
+                            }
                             self.screen = AppScreen::ApiKeysManager;
                         }
                     }
@@ -790,15 +841,26 @@ impl App {
                         }
                         KeyCode::Enter => {
                             let item = &self.settings_items[self.settings_index];
-                            if let SettingType::Bool = item.kind {
-                                // Toggle bool immediately
-                                let current = item.value.parse().unwrap_or(false);
-                                self.setting_input = (!current).to_string();
-                                self.apply_setting();
-                            } else {
-                                // Edit mode
-                                self.setting_input = item.value.clone();
-                                self.editing_setting = true;
+                            match &item.kind {
+                                SettingType::Bool => {
+                                    // Toggle bool immediately
+                                    let current = item.value.parse().unwrap_or(false);
+                                    self.setting_input = (!current).to_string();
+                                    self.apply_setting();
+                                }
+                                SettingType::Enum(options) => {
+                                    // Cycle next
+                                    let current_idx =
+                                        options.iter().position(|r| r == &item.value).unwrap_or(0);
+                                    let next_idx = (current_idx + 1) % options.len();
+                                    self.setting_input = options[next_idx].clone();
+                                    self.apply_setting();
+                                }
+                                _ => {
+                                    // Edit mode (String, Float)
+                                    self.setting_input = item.value.clone();
+                                    self.editing_setting = true;
+                                }
                             }
                         }
                         KeyCode::Esc => {
@@ -1047,10 +1109,15 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
+    let title = match app.config.as_ref().map(|c| &c.active_provider) {
+        Some(crate::config::AiProviderType::OpenRouter) => " OpenRouter API Keys ",
+        _ => " Google API Keys ",
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" API Keys Manager ");
+        .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1064,8 +1131,17 @@ fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     if let Some(config) = &app.config {
-        let items: Vec<ListItem> = config
-            .google_api_keys
+        let keys = match config.active_provider {
+            crate::config::AiProviderType::Google => &config.google_api_keys,
+            crate::config::AiProviderType::OpenRouter => &config.openrouter_api_keys,
+        };
+
+        // Reset index if out of bounds (safety)
+        // Note: we can't easily mutate app here to fix index, but rendering uses it.
+        // It's handled in logic, but for rendering we should be safe.
+        // let safe_index = app.api_keys_index.min(keys.len().saturating_sub(1));
+
+        let items: Vec<ListItem> = keys
             .iter()
             .enumerate()
             .map(|(i, key)| {

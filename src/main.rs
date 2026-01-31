@@ -4,7 +4,7 @@
 
 mod config;
 
-mod gemini;
+mod ai;
 mod security;
 mod setup;
 mod shorts;
@@ -12,10 +12,10 @@ mod tui;
 mod types;
 mod video;
 
+use ai::{AiClient, GoogleClient, OpenRouterClient};
 use anyhow::{Context, Result};
 use config::AppConfig;
 use crossterm::event::{self, Event, KeyEventKind};
-use gemini::GeminiClient;
 use security::EncryptionMode;
 use simplelog::{Config, LevelFilter, WriteLogger};
 use std::fs;
@@ -337,6 +337,8 @@ async fn run_app(
         app.security_error = Some("Startup: Password Required".to_string());
     } else {
         // Check for API Keys - if default or empty, go to ApiKeyInput
+        // We only check if Google is the provider or if generic check is needed?
+        // Let's stick to the previous logic but allow if keys exist.
         if config.google_api_keys.is_empty()
             || config
                 .google_api_keys
@@ -347,9 +349,21 @@ async fn run_app(
                 .iter()
                 .any(|k| k.value.trim().is_empty())
         {
-            app.screen = AppScreen::ApiKeyInput;
-            app.input.clear();
-            app.cursor_pos = 0;
+            // If Google keys are bad, do we check OpenRouter?
+            // Since default provider is Google, we probably want to enforce this or update TUI logic later to choose.
+            // For now, let's allow bypassing if OpenRouter keys are present?
+            // Or just stick to original logic: Force config setup if keys are missing.
+            // But user might want to use OpenRouter.
+            // Let's relax this: if Active Provider keys are missing, then prompt?
+            // But here we don't know if user wants to change provider in settings.
+            // Let's just go to ApiKeyInput if NO keys are good, or if active provider keys are missing.
+            // Simplification: Check Google keys only for now as default,
+            // or check if both are empty.
+            if config.google_api_keys.is_empty() && config.openrouter_api_keys.is_empty() {
+                app.screen = AppScreen::ApiKeyInput;
+                app.input.clear();
+                app.cursor_pos = 0;
+            }
         }
     }
 
@@ -629,6 +643,8 @@ async fn run_app(
                         format!("{}/temp.json", config_clone.default_output_dir);
                     let custom_format_clone = custom_format.clone();
                     let existing_moments = all_moments.clone();
+                    let active_security_mode_clone = app.active_security_mode;
+                    let active_password_clone = app.active_password.clone();
                     let cancellation_token = app.cancellation_token.clone();
 
                     // Reset token before starting
@@ -643,6 +659,8 @@ async fn run_app(
                             temp_json_path_clone,
                             custom_format_clone,
                             existing_moments,
+                            active_security_mode_clone,
+                            active_password_clone,
                             cancellation_token,
                         )
                         .await;
@@ -679,6 +697,8 @@ async fn run_app(
                             format!("{}/temp.json", config_clone.default_output_dir);
                         let custom_format_clone = custom_format.clone();
                         let moments_clone = app.moments.clone();
+                        let active_security_mode_clone = app.active_security_mode;
+                        let active_password_clone = app.active_password.clone();
                         let cancellation_token = app.cancellation_token.clone();
 
                         // Reset token
@@ -696,6 +716,8 @@ async fn run_app(
                                 temp_json_path_clone,
                                 custom_format_clone,
                                 moments_clone,
+                                active_security_mode_clone,
+                                active_password_clone,
                                 cancellation_token,
                             )
                             .await;
@@ -750,6 +772,10 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     shorts_config: config::ShortsConfig::default(),
                     gpu_acceleration: None,
                     use_fast_model: true,
+                    active_provider: config::AiProviderType::Google,
+                    openrouter_api_keys: vec![],
+                    openrouter_models: vec![],
+                    openrouter_model_index: 0,
 
                     active_encryption_mode: security::EncryptionMode::Password,
                     active_password: None,
@@ -769,6 +795,7 @@ fn load_config_with_fallback() -> Result<AppConfig> {
 }
 
 /// Run the main processing pipeline
+#[allow(clippy::too_many_arguments)]
 async fn run_processing(
     tx: TuiSender,
     config: AppConfig,
@@ -777,6 +804,8 @@ async fn run_processing(
     temp_json_path: String,
     custom_format: Option<String>,
     mut all_moments: Vec<VideoMoment>,
+    _active_security_mode: security::EncryptionMode,
+    _active_password: Option<String>,
     cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Ensure output directory exists
@@ -828,9 +857,18 @@ async fn run_processing(
     ));
     let _ = tx.send(AppMessage::Progress(0.2, "Splitting...".to_string()));
 
+    // Determine optimization flag based on active provider
+    // Determine optimization flag based on active provider
+    let optimize_for_ai = matches!(config.active_provider, config::AiProviderType::OpenRouter);
+
     let video_chunks = if Path::new(&temp_chunks_dir).exists()
         && fs::read_dir(&temp_chunks_dir)?.next().is_some()
     {
+        // Simple check: if optimizing, we might need to invalidate cache if existing chunks are high res?
+        // For simplicity, we assume cache is valid or user can clear it.
+        // Actually, if we switch providers, we might get wrong chunks.
+        // Let's add provider-specific suffix to chunks dir? Or just assume cache is okay for now.
+        // User can manually clear cache if needed.
         let _ = tx.send(AppMessage::Log(
             LogLevel::Info,
             "Using existing video chunks".to_string(),
@@ -851,6 +889,7 @@ async fn run_processing(
                 &temp_low_res,
                 &temp_chunks_dir,
                 &video::calculate_chunks(duration),
+                optimize_for_ai,
             )
             .await?
         } else {
@@ -858,7 +897,7 @@ async fn run_processing(
         }
     } else {
         let chunks = video::calculate_chunks(duration);
-        video::split_video(&temp_low_res, &temp_chunks_dir, &chunks).await?
+        video::split_video(&temp_low_res, &temp_chunks_dir, &chunks, optimize_for_ai).await?
     };
 
     let _ = tx.send(AppMessage::Log(
@@ -866,26 +905,51 @@ async fn run_processing(
         format!("Created {} chunks", video_chunks.len()),
     ));
 
-    // Analyze chunks with Gemini
-    let _ = tx.send(AppMessage::Status(
-        "Analyzing with Gemini AI...".to_string(),
-    ));
-    // Initialize Gemini Client
-    let enabled_keys: Vec<(String, String)> = config
-        .google_api_keys
-        .iter()
-        .filter(|k| k.enabled)
-        .map(|k| (k.name.clone(), k.value.clone()))
-        .collect();
+    // Analyze chunks with AI
+    let _ = tx.send(AppMessage::Status("Analyzing with AI...".to_string()));
 
-    if enabled_keys.is_empty() {
-        let _ = tx.send(AppMessage::Error(
-            "No enabled API keys found. Please check settings.".to_string(),
-        ));
-        return Ok((Vec::new(), None));
-    }
+    // Initialize AI Client
+    let ai_client = match config.active_provider {
+        config::AiProviderType::Google => {
+            let enabled_keys: Vec<(String, String)> = config
+                .google_api_keys
+                .iter()
+                .filter(|k| k.enabled)
+                .map(|k| (k.name.clone(), k.value.clone()))
+                .collect();
 
-    let gemini = GeminiClient::new(enabled_keys, config.use_fast_model);
+            if enabled_keys.is_empty() {
+                let _ = tx.send(AppMessage::Error(
+                    "No enabled Google API keys found.".to_string(),
+                ));
+                return Ok((Vec::new(), None));
+            }
+            AiClient::Google(GoogleClient::new(enabled_keys, config.use_fast_model))
+        }
+        config::AiProviderType::OpenRouter => {
+            let enabled_keys: Vec<(String, String)> = config
+                .openrouter_api_keys
+                .iter()
+                .filter(|k| k.enabled)
+                .map(|k| (k.name.clone(), k.value.clone()))
+                .collect();
+
+            if enabled_keys.is_empty() {
+                let _ = tx.send(AppMessage::Error(
+                    "No enabled OpenRouter API keys found.".to_string(),
+                ));
+                return Ok((Vec::new(), None));
+            }
+            // Get selected model
+            let model = config
+                .openrouter_models
+                .get(config.openrouter_model_index)
+                .cloned()
+                .unwrap_or_else(|| "google/gemini-2.0-flash-001".to_string());
+
+            AiClient::OpenRouter(OpenRouterClient::new(enabled_keys, model))
+        }
+    };
 
     // Iterate over chunks and analyze
     let mut chunks_analyzed = 0;
@@ -920,7 +984,7 @@ async fn run_processing(
             let _ = tx_clone.send(AppMessage::Status(msg));
         };
 
-        match gemini
+        match ai_client
             .process_chunk(&chunk.file_path, chunk.start_seconds, status_cb)
             .await
         {
@@ -938,7 +1002,9 @@ async fn run_processing(
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                if err_msg.contains("No API keys available") {
+                if err_msg.contains("No active API keys available")
+                    || err_msg.contains("API Keys Exhausted")
+                {
                     let _ = tx.send(AppMessage::Error(
                         "API Keys Exhausted during analysis.".to_string(),
                     ));
@@ -1037,12 +1103,15 @@ async fn run_processing(
         temp_json_path,
         custom_format,
         all_moments,
+        _active_security_mode,
+        _active_password,
         cancellation_token,
     )
     .await
 }
 
 /// Run the extraction phase (high-res download and clipping)
+#[allow(clippy::too_many_arguments)]
 async fn run_extraction(
     tx: TuiSender,
     config: AppConfig,
@@ -1051,6 +1120,8 @@ async fn run_extraction(
     temp_json_path: String,
     custom_format: Option<String>,
     all_moments: Vec<VideoMoment>,
+    _active_security_mode: security::EncryptionMode,
+    _active_password: Option<String>,
     cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Download high-res

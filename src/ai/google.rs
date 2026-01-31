@@ -19,8 +19,8 @@ struct ClientKey {
     enabled: AtomicBool,
 }
 
-/// Gemini API client
-pub struct GeminiClient {
+/// Google Gemini API client
+pub struct GoogleClient {
     client: Client,
     api_keys: Vec<Arc<ClientKey>>,
     current_key_index: AtomicUsize,
@@ -155,7 +155,7 @@ struct TextPart {
     text: String,
 }
 
-impl GeminiClient {
+impl GoogleClient {
     /// Create a new Gemini client
     pub fn new(api_keys: Vec<(String, String)>, use_fast_model: bool) -> Self {
         let model = if use_fast_model {

@@ -277,6 +277,7 @@ pub async fn split_video(
     input_path: &str,
     output_dir: &str,
     chunks: &[(u64, u64)],
+    optimize_for_ai: bool,
 ) -> Result<Vec<VideoChunk>> {
     let mut video_chunks = Vec::new();
 
@@ -304,26 +305,68 @@ pub async fn split_video(
             duration_time.clone(),
         ];
 
-        if use_nvenc {
-            args.extend_from_slice(&[
-                "-c:v".to_string(),
-                "h264_nvenc".to_string(),
-                "-preset".to_string(),
-                "p4".to_string(), // High quality preset
-                "-cq".to_string(),
-                "23".to_string(),
-                "-c:a".to_string(),
-                "aac".to_string(),
-            ]);
+        if optimize_for_ai {
+            // Optimization for AI: Downscale to 360p, 24fps, CRF 28 (smaller size)
+            // We force software encoding (libx264) for consistency in quality/size trade-off for AI chunks,
+            // or we could use NVENC with specific low-bitrate settings.
+            // Let's use libx264 'veryfast' to be safe and compatible, as exact bitrate control is easier.
+            // Actually, NVENC is fine if we set it right, but software is safer for "guaranteed" compatibility if speed isn't critical (30 mins chunk might take a bit).
+            // Let's stick to the plan: 360p, 24fps.
+
+            if use_nvenc {
+                args.extend_from_slice(&[
+                    "-vf".to_string(),
+                    "scale=-2:360,fps=24".to_string(),
+                    "-c:v".to_string(),
+                    "h264_nvenc".to_string(),
+                    "-preset".to_string(),
+                    "p4".to_string(),
+                    "-cq".to_string(),
+                    "32".to_string(), // Lower quality for AI (higher CQ)
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                    "-b:a".to_string(),
+                    "64k".to_string(), // Low bitrate audio is enough for speech
+                ]);
+            } else {
+                args.extend_from_slice(&[
+                    "-vf".to_string(),
+                    "scale=-2:360,fps=24".to_string(),
+                    "-c:v".to_string(),
+                    "libx264".to_string(),
+                    "-preset".to_string(),
+                    "veryfast".to_string(),
+                    "-crf".to_string(),
+                    "28".to_string(), // High compression
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                    "-b:a".to_string(),
+                    "64k".to_string(),
+                ]);
+            }
         } else {
-            args.extend_from_slice(&[
-                "-c:v".to_string(),
-                "libx264".to_string(),
-                "-preset".to_string(),
-                "superfast".to_string(),
-                "-c:a".to_string(),
-                "aac".to_string(),
-            ]);
+            // Original High Quality logic
+            if use_nvenc {
+                args.extend_from_slice(&[
+                    "-c:v".to_string(),
+                    "h264_nvenc".to_string(),
+                    "-preset".to_string(),
+                    "p4".to_string(), // High quality preset
+                    "-cq".to_string(),
+                    "23".to_string(),
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                ]);
+            } else {
+                args.extend_from_slice(&[
+                    "-c:v".to_string(),
+                    "libx264".to_string(),
+                    "-preset".to_string(),
+                    "superfast".to_string(),
+                    "-c:a".to_string(),
+                    "aac".to_string(),
+                ]);
+            }
         }
 
         args.push("-y".to_string());

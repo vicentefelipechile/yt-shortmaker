@@ -118,6 +118,20 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum AiProviderType {
+    Google,
+    OpenRouter,
+}
+
+fn default_provider() -> AiProviderType {
+    AiProviderType::Google
+}
+
+fn default_openrouter_models() -> Vec<String> {
+    vec!["google/gemini-2.0-flash-001".to_string()]
+}
+
 use crate::security::{EncryptionMode, SecuredConfig};
 
 /// Application configuration stored in settings.json
@@ -149,6 +163,22 @@ pub struct AppConfig {
     /// Whether to use the fast model (gemini-3-flash-preview) or pro model
     #[serde(default = "default_true")]
     pub use_fast_model: bool,
+
+    /// Active AI Provider
+    #[serde(default = "default_provider")]
+    pub active_provider: AiProviderType,
+
+    /// OpenRouter API Keys
+    #[serde(default, deserialize_with = "deserialize_api_keys")]
+    pub openrouter_api_keys: Vec<ApiKey>,
+
+    /// Available OpenRouter models
+    #[serde(default = "default_openrouter_models")]
+    pub openrouter_models: Vec<String>,
+
+    /// Selected OpenRouter model index
+    #[serde(default)]
+    pub openrouter_model_index: usize,
 
     // Internal State for Security (Not saved to JSON body)
     #[serde(skip)]
@@ -209,10 +239,9 @@ impl AppConfig {
             config.active_encryption_mode = EncryptionMode::None;
             config.active_password = None;
 
-            // Validate basic sanity
-            if config.google_api_keys.is_empty() {
-                return Err(anyhow::anyhow!("No API keys found in configuration."));
-            }
+            // Relaxed check: Allow start if NO keys are present so user can input them later.
+            // But if we want to enforce prompt, we check main.rs logic which does check for empty keys.
+            // So here we can just return Ok.
             Ok(config)
         }
     }
@@ -233,6 +262,10 @@ impl AppConfig {
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
             use_fast_model: true,
+            active_provider: AiProviderType::Google,
+            openrouter_api_keys: vec![],
+            openrouter_models: default_openrouter_models(),
+            openrouter_model_index: 0,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
@@ -257,9 +290,6 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Helper to save current state preserving current mode would require knowing the current mode
-    /// For now, we'll assume the caller knows the mode, or we default to 'Simple' if not specified?
-    /// Actually, in the app flow we should store the 'active encryption mode' in memory.
     /// Ensure output directory exists
     pub fn ensure_output_dir(&self) -> Result<()> {
         if !Path::new(&self.default_output_dir).exists() {
@@ -323,6 +353,10 @@ mod tests {
             shorts_config: ShortsConfig::default(),
             gpu_acceleration: None,
             use_fast_model: true,
+            active_provider: AiProviderType::Google,
+            openrouter_api_keys: vec![],
+            openrouter_models: vec![],
+            openrouter_model_index: 0,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
