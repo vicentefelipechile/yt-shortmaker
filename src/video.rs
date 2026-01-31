@@ -157,6 +157,15 @@ pub async fn download_low_res(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if log::log_enabled!(log::Level::Debug) {
+            log::error!("yt-dlp failed to download low-res video");
+            log::error!("Command: yt-dlp {}", args.join(" "));
+            log::error!("Stdout: {}", stdout);
+            log::error!("Stderr: {}", stderr);
+        }
+
         return Err(anyhow!("yt-dlp failed: {}", stderr.trim()));
     }
 
@@ -229,11 +238,26 @@ pub async fn download_high_res(
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if attempt >= max_retries {
+            if log::log_enabled!(log::Level::Debug) {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                log::error!("yt-dlp final failure for high-res video");
+                log::error!("Command: yt-dlp {}", args.join(" "));
+                log::error!("Stdout: {}", stdout);
+                log::error!("Stderr: {}", stderr);
+            }
+
             return Err(anyhow!(
                 "yt-dlp failed after {} attempts: {}",
                 max_retries,
                 stderr.trim()
             ));
+        }
+
+        if log::log_enabled!(log::Level::Debug) {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            log::warn!("yt-dlp attempt {} failed", attempt);
+            log::warn!("Stdout: {}", stdout);
+            log::warn!("Stderr: {}", stderr);
         }
 
         eprintln!(

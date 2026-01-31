@@ -59,6 +59,16 @@ async fn main() -> Result<()> {
                 .append(true)
                 .open("debug.log")?,
         );
+        log::info!("=== YT ShortMaker Debug Session Started ===");
+        log::info!("Version: {}", APP_VERSION);
+
+        // Set panic hook to log panics
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log::error!("PANIC: {}", info);
+            default_hook(info);
+        }));
+
         log::info!("Starting YT ShortMaker with debug logging");
         log::debug!("Raw Args: {:?}", args);
     }
@@ -635,13 +645,17 @@ async fn run_app(
                     cancellation_token.store(false, Ordering::Relaxed);
 
                     tokio::spawn(async move {
+                        let context = ProcessingContext {
+                            url: url_clone,
+                            temp_dir: temp_dir_clone,
+                            temp_json_path: temp_json_path_clone,
+                            custom_format: custom_format_clone,
+                        };
+
                         let result = run_processing(
                             tx_clone.clone(),
                             config_clone,
-                            url_clone,
-                            temp_dir_clone,
-                            temp_json_path_clone,
-                            custom_format_clone,
+                            context,
                             existing_moments,
                             cancellation_token,
                         )
@@ -688,13 +702,16 @@ async fn run_app(
                         app.screen = AppScreen::Processing;
 
                         tokio::spawn(async move {
+                            let context = ProcessingContext {
+                                url: url_clone,
+                                temp_dir: temp_dir_clone,
+                                temp_json_path: temp_json_path_clone,
+                                custom_format: custom_format_clone,
+                            };
                             let result = run_extraction(
                                 tx_clone.clone(),
                                 config_clone.clone(),
-                                url_clone,
-                                temp_dir_clone,
-                                temp_json_path_clone,
-                                custom_format_clone,
+                                context,
                                 moments_clone,
                                 cancellation_token,
                             )
@@ -768,19 +785,28 @@ fn load_config_with_fallback() -> Result<AppConfig> {
     }
 }
 
-/// Run the main processing pipeline
-async fn run_processing(
-    tx: TuiSender,
-    config: AppConfig,
+/// Context for processing/extraction to reduce argument count
+#[derive(Clone, Debug)]
+struct ProcessingContext {
     url: String,
     temp_dir: String,
     temp_json_path: String,
     custom_format: Option<String>,
+}
+
+/// Run the main processing pipeline
+async fn run_processing(
+    tx: TuiSender,
+    config: AppConfig,
+    context: ProcessingContext,
     mut all_moments: Vec<VideoMoment>,
     cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
     // Ensure output directory exists
     config.ensure_output_dir()?;
+    let url = context.url.clone();
+    let temp_dir = context.temp_dir.clone();
+    let temp_json_path = context.temp_json_path.clone();
 
     // Save initial state
     save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
@@ -1029,30 +1055,21 @@ async fn run_processing(
         return Ok((all_moments, None));
     }
 
-    run_extraction(
-        tx,
-        config,
-        url,
-        temp_dir,
-        temp_json_path,
-        custom_format,
-        all_moments,
-        cancellation_token,
-    )
-    .await
+    run_extraction(tx, config, context, all_moments, cancellation_token).await
 }
 
 /// Run the extraction phase (high-res download and clipping)
 async fn run_extraction(
     tx: TuiSender,
     config: AppConfig,
-    url: String,
-    temp_dir: String,
-    temp_json_path: String,
-    custom_format: Option<String>,
+    context: ProcessingContext,
     all_moments: Vec<VideoMoment>,
     cancellation_token: Arc<AtomicBool>,
 ) -> Result<(Vec<VideoMoment>, Option<String>)> {
+    let url = context.url.clone();
+    let temp_dir = context.temp_dir.clone();
+    let temp_json_path = context.temp_json_path.clone();
+
     // Download high-res
     let _ = tx.send(AppMessage::Status(
         "Downloading High-Res video...".to_string(),
@@ -1069,7 +1086,7 @@ async fn run_extraction(
             &source_high_res,
             config.use_cookies,
             &config.cookies_path,
-            custom_format,
+            context.custom_format,
         )
         .await
         .context("Failed to download high-res video")?;
