@@ -2,12 +2,12 @@ name: Rust Test
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "openrouter" ]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "openrouter" ]
     paths-ignore:
       - '**.md'
       - 'LICENSE'

@@ -113,6 +113,8 @@ pub enum SettingType {
     String,
     Bool,
     Float,
+    Path,
+    Directory,
 }
 
 /// Definition of a setting to be edited
@@ -234,7 +236,7 @@ impl App {
                     name: "Output Directory".to_string(),
                     key: "output_dir".to_string(),
                     value: config.default_output_dir.clone(),
-                    kind: SettingType::String,
+                    kind: SettingType::Directory,
                     description: rust_i18n::t!("desc_output_dir").to_string(),
                 },
                 SettingItem {
@@ -255,7 +257,7 @@ impl App {
                     name: "Cookies Path".to_string(),
                     key: "cookies_path".to_string(),
                     value: config.cookies_path.clone(),
-                    kind: SettingType::String,
+                    kind: SettingType::Path,
                     description: rust_i18n::t!("desc_cookies_path").to_string(),
                 },
                 SettingItem {
@@ -461,7 +463,11 @@ impl App {
                         if let Some(config) = &mut self.config {
                             config.google_api_keys.push(crate::config::ApiKey {
                                 value: self.input.trim().to_string(),
-                                name: format!("Gemini Key {}", config.google_api_keys.len() + 1),
+                                name: rust_i18n::t!(
+                                    "default_key_name",
+                                    number = config.google_api_keys.len() + 1
+                                )
+                                .to_string(),
                                 enabled: true,
                             });
                             if let Err(e) = config.save() {
@@ -795,6 +801,18 @@ impl App {
                                 let current = item.value.parse().unwrap_or(false);
                                 self.setting_input = (!current).to_string();
                                 self.apply_setting();
+                            } else if let SettingType::Path = item.kind {
+                                // Open file dialog
+                                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                    self.setting_input = path.to_string_lossy().to_string();
+                                    self.apply_setting();
+                                }
+                            } else if let SettingType::Directory = item.kind {
+                                // Open directory dialog
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    self.setting_input = path.to_string_lossy().to_string();
+                                    self.apply_setting();
+                                }
                             } else {
                                 // Edit mode
                                 self.setting_input = item.value.clone();
@@ -1050,7 +1068,7 @@ fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" API Keys Manager ");
+        .title(format!(" {} ", rust_i18n::t!("keys_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1104,7 +1122,7 @@ fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(list, layout[0]);
     }
 
-    let help = Paragraph::new("[A] Add   [R] Rename   [Space] Toggle   [D] Delete   [Esc] Back")
+    let help = Paragraph::new(rust_i18n::t!("keys_help").to_string())
         .style(Style::default().fg(Color::Gray))
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(help, layout[1]);
@@ -1114,7 +1132,7 @@ fn render_api_key_rename(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(" Rename API Key ");
+        .title(format!(" {} ", rust_i18n::t!("keys_rename_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1135,9 +1153,8 @@ fn render_api_key_rename(frame: &mut Frame, app: &App, area: Rect) {
     let input = Paragraph::new(app.input.as_str()).block(input_block);
     frame.render_widget(input, layout[1]);
 
-    let help =
-        Paragraph::new("Enter new name for the key.\nPress [Enter] to save, [Esc] to cancel.")
-            .style(Style::default().fg(Color::Gray));
+    let help = Paragraph::new(rust_i18n::t!("keys_rename_help").to_string())
+        .style(Style::default().fg(Color::Gray));
     frame.render_widget(help, layout[2]);
 
     // Cursor
@@ -1148,7 +1165,7 @@ fn render_api_key_add_input(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
-        .title(" Add New API Key ");
+        .title(format!(" {} ", rust_i18n::t!("keys_add_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1169,10 +1186,8 @@ fn render_api_key_add_input(frame: &mut Frame, app: &App, area: Rect) {
     let input = Paragraph::new(app.input.as_str()).block(input_block);
     frame.render_widget(input, layout[1]);
 
-    let help = Paragraph::new(
-        "Paste your Google Gemini API Key here.\nPress [Enter] to save, [Esc] to cancel.",
-    )
-    .style(Style::default().fg(Color::Gray));
+    let help = Paragraph::new(rust_i18n::t!("keys_add_help").to_string())
+        .style(Style::default().fg(Color::Gray));
     frame.render_widget(help, layout[2]);
 
     // Cursor
@@ -1326,14 +1341,44 @@ fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
 
             let prefix = if is_selected { "> " } else { "  " };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(val_color)),
-                Span::styled(
-                    format!("{:<20}: ", item.name),
-                    Style::default().fg(key_color),
-                ),
-                Span::styled(&item.value, Style::default().fg(val_color)),
-            ]))
+            // Add hint for Path/Directory
+            if is_selected {
+                match item.kind {
+                    SettingType::Path | SettingType::Directory => {
+                        let hint = Span::styled(
+                            " (Press Enter to browse)",
+                            Style::default().fg(Color::DarkGray),
+                        );
+                        // Reconstruct line to add hint
+                        ListItem::new(Line::from(vec![
+                            Span::styled(prefix, Style::default().fg(val_color)),
+                            Span::styled(
+                                format!("{:<20}: ", item.name),
+                                Style::default().fg(key_color),
+                            ),
+                            Span::styled(&item.value, Style::default().fg(val_color)),
+                            hint,
+                        ]))
+                    }
+                    _ => ListItem::new(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(val_color)),
+                        Span::styled(
+                            format!("{:<20}: ", item.name),
+                            Style::default().fg(key_color),
+                        ),
+                        Span::styled(&item.value, Style::default().fg(val_color)),
+                    ])),
+                }
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(val_color)),
+                    Span::styled(
+                        format!("{:<20}: ", item.name),
+                        Style::default().fg(key_color),
+                    ),
+                    Span::styled(&item.value, Style::default().fg(val_color)),
+                ]))
+            }
         })
         .collect();
 
