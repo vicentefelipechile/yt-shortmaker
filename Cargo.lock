@@ -3842,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "yt-shortmaker"
-version = "1.10.25"
+version = "1.10.26"
 dependencies = [
  "aes-gcm",
  "anyhow",

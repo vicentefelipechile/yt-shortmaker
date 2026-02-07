@@ -21,15 +21,6 @@ pub fn extract_video_id(url: &str) -> Option<String> {
 
 /// Check if required external dependencies are available
 pub fn check_dependencies() -> Result<()> {
-    // These are quick checks, fine to run synchronously/blocking for now
-    // or we can use std::process::Command just for this check if we want to avoid async here,
-    // but mixing might be confusing. Let's stick to std::process for simple quick checks
-    // that run before the loop, or convert to async.
-    // Since this is called before async runtime might be fully utilized or during setup,
-    // let's keep std::process::Command for this one function if possible, or convert.
-    // The "Command" imported now is tokio::process::Command.
-    // Let's use std::process::Command fully qualified for this check.
-
     let ffmpeg = std::process::Command::new("ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
@@ -471,9 +462,10 @@ pub fn parse_timestamp_to_seconds(timestamp: &str) -> Result<u64> {
     Ok(hours * 3600 + minutes * 60 + seconds)
 }
 
-/// Validate YouTube URL
-pub fn validate_youtube_url(url: &str) -> bool {
-    url.contains("youtube.com/watch") || url.contains("youtu.be/")
+/// Validate Media URL
+pub fn validate_media_url(url: &str) -> bool {
+    let url_lower = url.to_lowercase();
+    url_lower.starts_with("http://") || url_lower.starts_with("https://")
 }
 
 /// Clean up temporary files
@@ -519,11 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_youtube_url() {
-        assert!(validate_youtube_url(
-            "https://www.youtube.com/watch?v=abc123"
-        ));
-        assert!(validate_youtube_url("https://youtu.be/abc123"));
-        assert!(!validate_youtube_url("https://vimeo.com/video"));
+    fn test_validate_media_url() {
+        assert!(validate_media_url("https://www.youtube.com/watch?v=abc123"));
+        assert!(validate_media_url("https://youtu.be/abc123"));
+        assert!(validate_media_url("https://vimeo.com/video"));
+        assert!(validate_media_url("http://example.com/video.mp4"));
+
+        // Negative cases
+        assert!(!validate_media_url("not_a_url"));
+        assert!(!validate_media_url("ftp://server/file.mp4"));
+        assert!(!validate_media_url("file:///local/path"));
     }
 }

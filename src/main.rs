@@ -511,7 +511,7 @@ async fn run_app(
             AppScreen::UrlInput => {
                 if app.confirm_response.take().is_some() {
                     let input_url = app.input.trim().to_string();
-                    if video::validate_youtube_url(&input_url) {
+                    if video::validate_media_url(&input_url) {
                         url = input_url;
                         app.log(LogLevel::Success, format!("Valid URL: {}", url));
 
@@ -538,7 +538,7 @@ async fn run_app(
                         all_moments.clear();
                         app.screen = AppScreen::FormatConfirm;
                     } else {
-                        app.log(LogLevel::Error, "Invalid YouTube URL".to_string());
+                        app.log(LogLevel::Error, "Invalid Media URL".to_string());
                         app.input.clear();
                         app.cursor_pos = 0;
                     }

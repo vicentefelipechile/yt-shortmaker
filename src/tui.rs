@@ -1930,17 +1930,17 @@ fn render_processing_cancel_confirm(frame: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(Color::Red))
         .title(format!(" 🛑 {} ", rust_i18n::t!("cancel_title")));
 
-    let area = centered_rect(50, 40, area);
+    let area = centered_rect(60, 60, area);
     frame.render_widget(block, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(2)
+        .margin(1)
         .constraints(
             [
                 Constraint::Length(3), // Msg
                 Constraint::Min(4),    // Warning
-                Constraint::Length(3), // Options
+                Constraint::Length(4), // Options
             ]
             .as_ref(),
         )
@@ -1962,8 +1962,13 @@ fn render_processing_cancel_confirm(frame: &mut Frame, area: Rect) {
     frame.render_widget(warn, chunks[1]);
 
     let options = Text::from(vec![
-        Line::from(rust_i18n::t!("cancel_yes")).style(Style::default().fg(Color::Red)),
+        Line::from(rust_i18n::t!("cancel_instr")).style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::from(""),
+        Line::from(rust_i18n::t!("cancel_yes")).style(Style::default().fg(Color::Red)),
         Line::from(rust_i18n::t!("cancel_no")).style(Style::default().fg(Color::Green)),
     ]);
 
