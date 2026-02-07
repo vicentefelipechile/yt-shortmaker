@@ -36,7 +36,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libx11-dev libasound2-dev libudev-dev
+        sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libx11-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev
 
     - name: Check Formatting
       run: cargo fmt -- --check
