@@ -159,7 +159,10 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
             );
             println!("   Overlays: {}", config.shorts_config.overlays.len());
 
-            shorts::transform_to_short(video_path, &output_path, &config.shorts_config).await?;
+            let token = Arc::new(AtomicBool::new(false));
+
+            shorts::transform_to_short(video_path, &output_path, &config.shorts_config, token)
+                .await?;
 
             println!("✅ Short saved to: {}", output_path);
             Ok(())
@@ -184,6 +187,8 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
             println!("   Input dir: {}", input_dir);
             println!("   Output dir: {}", output_dir);
 
+            let token = Arc::new(AtomicBool::new(false));
+
             let results = shorts::transform_batch(
                 input_dir,
                 &output_dir,
@@ -191,6 +196,7 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
                 Some(Box::new(|current, total, name| {
                     println!("   [{}/{}] Processing: {}", current, total, name);
                 })),
+                token,
             )
             .await?;
 
@@ -754,6 +760,7 @@ async fn run_processing(
             &temp_low_res,
             config.use_cookies,
             &config.cookies_path,
+            cancellation_token.clone(),
         )
         .await
         .context("Failed to download low-res video")?;
@@ -806,6 +813,7 @@ async fn run_processing(
                 &temp_low_res,
                 &temp_chunks_dir,
                 &video::calculate_chunks(duration),
+                cancellation_token.clone(),
             )
             .await?
         } else {
@@ -813,7 +821,13 @@ async fn run_processing(
         }
     } else {
         let chunks = video::calculate_chunks(duration);
-        video::split_video(&temp_low_res, &temp_chunks_dir, &chunks).await?
+        video::split_video(
+            &temp_low_res,
+            &temp_chunks_dir,
+            &chunks,
+            cancellation_token.clone(),
+        )
+        .await?
     };
 
     let _ = tx.send(AppMessage::Log(
@@ -876,7 +890,12 @@ async fn run_processing(
         };
 
         match gemini
-            .process_chunk(&chunk.file_path, chunk.start_seconds, status_cb)
+            .process_chunk(
+                &chunk.file_path,
+                chunk.start_seconds,
+                status_cb,
+                cancellation_token.clone(),
+            )
             .await
         {
             Ok(moments) => {
@@ -893,6 +912,9 @@ async fn run_processing(
             }
             Err(e) => {
                 let err_msg = e.to_string();
+                if err_msg.contains("cancelled") {
+                    return Ok((Vec::new(), None));
+                }
                 if err_msg.contains("No API keys available") {
                     let _ = tx.send(AppMessage::Error(
                         "API Keys Exhausted during analysis.".to_string(),
@@ -926,14 +948,22 @@ async fn run_processing(
         let video_id = extract_video_id(&url).unwrap_or("video".to_string());
         let output_file = format!("{}/{}_full.mp4", config.default_output_dir, video_id);
 
-        video::download_high_res(
+        let result = video::download_high_res(
             &url,
             &output_file,
             config.use_cookies,
             &config.cookies_path,
             None,
+            cancellation_token.clone(),
         )
-        .await?;
+        .await;
+
+        if let Err(e) = result {
+            if e.to_string().contains("cancelled") {
+                return Ok((Vec::new(), None));
+            }
+            return Err(e);
+        }
 
         let _ = tx.send(AppMessage::Complete(format!(
             "Full video saved to: {}",
@@ -1016,6 +1046,7 @@ async fn run_extraction(
             config.use_cookies,
             &config.cookies_path,
             context.custom_format,
+            cancellation_token.clone(),
         )
         .await
         .context("Failed to download high-res video")?;
@@ -1062,6 +1093,7 @@ async fn run_extraction(
             &moment.start_time,
             &moment.end_time,
             &output_path,
+            cancellation_token.clone(),
         )
         .await
         {

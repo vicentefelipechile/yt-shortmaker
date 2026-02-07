@@ -238,11 +238,16 @@ impl GeminiClient {
         file_path: &str,
         chunk_start_offset: u64,
         status_callback: F,
+        cancellation_token: Arc<AtomicBool>,
     ) -> Result<Vec<VideoMoment>>
     where
         F: Fn(String),
     {
         loop {
+            if cancellation_token.load(Ordering::Relaxed) {
+                return Err(anyhow!("Process cancelled by user"));
+            }
+
             // Get a key
             let key_arc = self
                 .get_active_key()
@@ -252,9 +257,15 @@ impl GeminiClient {
             status_callback(format!("Uploading with {}...", key_name));
 
             // 1. Upload
-            let file_uri = match self.upload_video_internal(&key_arc, file_path).await {
+            let file_uri = match self
+                .upload_video_internal(&key_arc, file_path, cancellation_token.clone())
+                .await
+            {
                 Ok(uri) => uri,
                 Err(e) => {
+                    if e.to_string().contains("cancelled") {
+                        return Err(e);
+                    }
                     eprintln!("Upload failed with key {}: {}", key_name, e);
                     // If upload fails, check if it's a quota issue or just network
                     // For now, we rotate and retry loop
@@ -297,7 +308,12 @@ impl GeminiClient {
         }
     }
 
-    async fn upload_video_internal(&self, key: &ClientKey, file_path: &str) -> Result<String> {
+    async fn upload_video_internal(
+        &self,
+        key: &ClientKey,
+        file_path: &str,
+        cancellation_token: Arc<AtomicBool>,
+    ) -> Result<String> {
         let path = Path::new(file_path);
         let file_name = path
             .file_name()
@@ -355,13 +371,18 @@ impl GeminiClient {
             .context("Failed to parse upload response")?;
 
         // Wait for file to be processed with SAME KEY
-        self.wait_for_file_active(key, &upload_result.file.name)
+        self.wait_for_file_active(key, &upload_result.file.name, cancellation_token.clone())
             .await?;
 
         Ok(upload_result.file.uri)
     }
 
-    async fn wait_for_file_active(&self, key: &ClientKey, file_name: &str) -> Result<()> {
+    async fn wait_for_file_active(
+        &self,
+        key: &ClientKey,
+        file_name: &str,
+        cancellation_token: Arc<AtomicBool>,
+    ) -> Result<()> {
         let current_key = &key.value;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/{}?key={}",
@@ -369,6 +390,10 @@ impl GeminiClient {
         );
 
         for _ in 0..60 {
+            if cancellation_token.load(Ordering::Relaxed) {
+                return Err(anyhow!("Process cancelled by user"));
+            }
+
             let response = self
                 .client
                 .get(&url)

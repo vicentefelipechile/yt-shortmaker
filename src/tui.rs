@@ -1533,11 +1533,13 @@ fn render_processing(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .title(" Activity Log ");
 
+    let log_height = layout[1].height.saturating_sub(2);
+
     let log_items: Vec<ListItem> = app
         .logs
         .iter()
         .rev()
-        .take(10)
+        .take(log_height as usize)
         .map(|entry| {
             let (icon, color) = match entry.level {
                 LogLevel::Info => ("ℹ️ ", Color::Blue),

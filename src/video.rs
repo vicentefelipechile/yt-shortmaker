@@ -3,7 +3,11 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::process::Command;
+use tokio::time::Duration;
 
 use crate::types::VideoChunk;
 use regex::Regex;
@@ -17,12 +21,21 @@ pub fn extract_video_id(url: &str) -> Option<String> {
 
 /// Check if required external dependencies are available
 pub fn check_dependencies() -> Result<()> {
-    let ffmpeg = Command::new("ffmpeg")
+    // These are quick checks, fine to run synchronously/blocking for now
+    // or we can use std::process::Command just for this check if we want to avoid async here,
+    // but mixing might be confusing. Let's stick to std::process for simple quick checks
+    // that run before the loop, or convert to async.
+    // Since this is called before async runtime might be fully utilized or during setup,
+    // let's keep std::process::Command for this one function if possible, or convert.
+    // The "Command" imported now is tokio::process::Command.
+    // Let's use std::process::Command fully qualified for this check.
+
+    let ffmpeg = std::process::Command::new("ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .output();
-    let ytdlp = Command::new("yt-dlp")
+    let ytdlp = std::process::Command::new("yt-dlp")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -59,9 +72,42 @@ pub fn check_dependencies() -> Result<()> {
     Ok(())
 }
 
+/// Helper to run a command with cancellation support
+pub async fn run_command_with_cancellation(
+    mut command: Command,
+    cancellation_token: Arc<AtomicBool>,
+) -> Result<std::process::Output> {
+    command.kill_on_drop(true);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let child = command.spawn().context("Failed to spawn command")?;
+    let output_future = child.wait_with_output();
+
+    let cancellation_future = async {
+        loop {
+            if cancellation_token.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    tokio::select! {
+        result = output_future => {
+            result.context("Failed to wait on child process")
+        }
+        _ = cancellation_future => {
+            // Process will be killed because output_future is dropped and we set kill_on_drop(true)
+            Err(anyhow!("Process cancelled by user"))
+        }
+    }
+}
+
 /// Get video duration in seconds using ffprobe
 pub fn get_video_duration(file_path: &str) -> Result<u64> {
-    let output = Command::new("ffprobe")
+    // Keep synchronous for now as it's fast
+    let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
             "error",
@@ -91,6 +137,7 @@ pub async fn download_low_res(
     output_path: &str,
     use_cookies: bool,
     cookies_path: &str,
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut args = vec![
         "-f",
@@ -120,12 +167,10 @@ pub async fn download_low_res(
 
     args.push(url);
 
-    let output = Command::new("yt-dlp")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to execute yt-dlp")?;
+    let mut command = Command::new("yt-dlp");
+    command.args(&args);
+
+    let output = run_command_with_cancellation(command, cancellation_token).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -159,6 +204,7 @@ pub async fn download_high_res(
     use_cookies: bool,
     cookies_path: &str,
     custom_format: Option<String>,
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<()> {
     let default_format =
         "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best".to_string();
@@ -196,50 +242,54 @@ pub async fn download_high_res(
     let max_retries = 3;
 
     loop {
-        let output = Command::new("yt-dlp")
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .context("Failed to execute yt-dlp")?;
-
-        if output.status.success() {
-            return Ok(());
+        // Check cancellation before retry
+        if cancellation_token.load(Ordering::Relaxed) {
+            return Err(anyhow!("Process cancelled by user"));
         }
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut command = Command::new("yt-dlp");
+        command.args(&args);
 
-        if attempt >= max_retries {
-            if log::log_enabled!(log::Level::Debug) {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                log::error!("yt-dlp final failure for high-res video");
-                log::error!("Command: yt-dlp {}", args.join(" "));
-                log::error!("Stdout: {}", stdout);
-                log::error!("Stderr: {}", stderr);
+        // We use the helper, which also checks cancellation during run
+        let result = run_command_with_cancellation(command, cancellation_token.clone()).await;
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    return Ok(());
+                }
+
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if attempt >= max_retries {
+                    if log::log_enabled!(log::Level::Debug) {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        log::error!("yt-dlp final failure for high-res video");
+                        log::error!("Command: yt-dlp {}", args.join(" "));
+                        log::error!("Stdout: {}", stdout);
+                        log::error!("Stderr: {}", stderr);
+                    }
+
+                    return Err(anyhow!(
+                        "yt-dlp failed after {} attempts: {}",
+                        max_retries,
+                        stderr.trim()
+                    ));
+                }
+
+                log::warn!("yt-dlp attempt {} failed: {}", attempt, stderr.trim());
             }
-
-            return Err(anyhow!(
-                "yt-dlp failed after {} attempts: {}",
-                max_retries,
-                stderr.trim()
-            ));
+            Err(e) => {
+                // If it was cancelled, return immediately
+                if e.to_string().contains("cancelled") {
+                    return Err(e);
+                }
+                // Otherwise treat as error (or retry fallback logic if we wanted)
+                return Err(e);
+            }
         }
 
-        if log::log_enabled!(log::Level::Debug) {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            log::warn!("yt-dlp attempt {} failed", attempt);
-            log::warn!("Stdout: {}", stdout);
-            log::warn!("Stderr: {}", stderr);
-        }
-
-        eprintln!(
-            "HD download failed (Attempt {}/{}). Retrying in 30 seconds... Error: {}",
-            attempt,
-            max_retries,
-            stderr.trim()
-        );
-
-        std::thread::sleep(std::time::Duration::from_secs(30));
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         attempt += 1;
     }
 }
@@ -273,6 +323,7 @@ pub async fn split_video(
     input_path: &str,
     output_dir: &str,
     chunks: &[(u64, u64)],
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<Vec<VideoChunk>> {
     let mut video_chunks = Vec::new();
 
@@ -280,6 +331,11 @@ pub async fn split_video(
     std::fs::create_dir_all(output_dir)?;
 
     for (i, (start, duration)) in chunks.iter().enumerate() {
+        // Check cancellation before each chunk
+        if cancellation_token.load(Ordering::Relaxed) {
+            return Err(anyhow!("Process cancelled by user"));
+        }
+
         let chunk_path = format!("{}/chunk_{}.mp4", output_dir, i);
 
         let start_time = format_seconds_to_timestamp(*start);
@@ -310,12 +366,10 @@ pub async fn split_video(
         args.push("-y".to_string());
         args.push(chunk_path.clone());
 
-        let output = Command::new("ffmpeg")
-            .args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .context(format!("Failed to execute ffmpeg for chunk {}", i))?;
+        let mut command = Command::new("ffmpeg");
+        command.args(&args);
+
+        let output = run_command_with_cancellation(command, cancellation_token.clone()).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -341,7 +395,12 @@ pub async fn extract_clip(
     start_time: &str,
     end_time: &str,
     output_path: &str,
+    cancellation_token: Arc<AtomicBool>,
 ) -> Result<()> {
+    if cancellation_token.load(Ordering::Relaxed) {
+        return Err(anyhow!("Process cancelled by user"));
+    }
+
     // Calculate duration for -t argument
     let start_sec = parse_timestamp_to_seconds(start_time).context("Failed to parse start time")?;
     let end_sec = parse_timestamp_to_seconds(end_time).context("Failed to parse end time")?;
@@ -377,12 +436,10 @@ pub async fn extract_clip(
     args.push("-y".to_string());
     args.push(output_path.to_string());
 
-    let output = Command::new("ffmpeg")
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to execute ffmpeg for extraction")?;
+    let mut command = Command::new("ffmpeg");
+    command.args(&args);
+
+    let output = run_command_with_cancellation(command, cancellation_token).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

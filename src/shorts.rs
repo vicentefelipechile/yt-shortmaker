@@ -174,6 +174,7 @@ pub async fn transform_to_short(
     input_video: &str,
     output_path: &str,
     config: &ShortsConfig,
+    cancellation_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     if !Path::new(input_video).exists() {
         return Err(anyhow!("Input video not found: {}", input_video));
@@ -233,7 +234,6 @@ pub async fn transform_to_short(
     args.push("0:a?".to_string()); // Audio from main video (optional)
 
     // Output settings
-    // Output settings
     args.push("-c:v".to_string());
     args.push("libx264".to_string());
     args.push("-preset".to_string());
@@ -248,12 +248,11 @@ pub async fn transform_to_short(
     args.push("-y".to_string());
     args.push(output_path.to_string());
 
-    let output = Command::new("ffmpeg")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to execute ffmpeg for transformation")?;
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command.args(&args);
+
+    // Use the cancellation helper from video module
+    let output = crate::video::run_command_with_cancellation(command, cancellation_token).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -364,8 +363,10 @@ pub async fn transform_batch(
     output_dir: &str,
     config: &ShortsConfig,
     progress_callback: Option<ProgressCallback>,
+    cancellation_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<String>> {
     use std::fs;
+    use std::sync::atomic::Ordering;
 
     // Ensure output directory exists
     fs::create_dir_all(output_dir)?;
@@ -385,6 +386,10 @@ pub async fn transform_batch(
     let mut output_files = Vec::new();
 
     for (i, entry) in entries.iter().enumerate() {
+        if cancellation_token.load(Ordering::Relaxed) {
+            return Err(anyhow!("Process cancelled by user"));
+        }
+
         let input_path = entry.path();
         let file_name = input_path.file_name().unwrap().to_string_lossy();
         let output_path = format!("{}/short_{}", output_dir, file_name);
@@ -393,11 +398,22 @@ pub async fn transform_batch(
             callback(i + 1, total, &file_name);
         }
 
-        match transform_to_short(input_path.to_str().unwrap(), &output_path, config).await {
+        match transform_to_short(
+            input_path.to_str().unwrap(),
+            &output_path,
+            config,
+            cancellation_token.clone(),
+        )
+        .await
+        {
             Ok(_) => {
                 output_files.push(output_path);
             }
             Err(e) => {
+                // If cancelled, stop everything
+                if e.to_string().contains("cancelled") {
+                    return Err(e);
+                }
                 eprintln!("Failed to transform {}: {}", file_name, e);
             }
         }
