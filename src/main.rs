@@ -121,13 +121,7 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
                 config.shorts_config.overlays.len()
             );
 
-            shorts::generate_preview(
-                video_path,
-                &output_image,
-                &config.shorts_config,
-                timestamp,
-                config.gpu_acceleration.unwrap_or(false),
-            )?;
+            shorts::generate_preview(video_path, &output_image, &config.shorts_config, timestamp)?;
 
             println!("✅ Preview saved to: {}", output_image);
             Ok(())
@@ -165,13 +159,7 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
             );
             println!("   Overlays: {}", config.shorts_config.overlays.len());
 
-            shorts::transform_to_short(
-                video_path,
-                &output_path,
-                &config.shorts_config,
-                config.gpu_acceleration.unwrap_or(false),
-            )
-            .await?;
+            shorts::transform_to_short(video_path, &output_path, &config.shorts_config).await?;
 
             println!("✅ Short saved to: {}", output_path);
             Ok(())
@@ -200,7 +188,6 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
                 input_dir,
                 &output_dir,
                 &config.shorts_config,
-                config.gpu_acceleration.unwrap_or(false),
                 Some(Box::new(|current, total, name| {
                     println!("   [{}/{}] Processing: {}", current, total, name);
                 })),
@@ -433,7 +420,6 @@ async fn run_app(
             // Ideally we'd only do this if changed, but cloning config is cheap enough
             // We need to keep our local `config` var updated for the processing step
             if c.default_output_dir != config.default_output_dir
-                || c.gpu_acceleration != config.gpu_acceleration
                 || c.shorts_config.output_width != config.shorts_config.output_width
             {
                 // Just update the whole thing to be safe
@@ -447,50 +433,30 @@ async fn run_app(
         // Handle logical transitions
         // Detect "Start" from MainMenu -> UrlInput
         if previous_screen == AppScreen::MainMenu && app.screen == AppScreen::UrlInput {
-            // Perform Startup Checks (GPU, Resume)
+            // Perform Startup Checks (Resume)
             let current_config = app.config.clone().unwrap_or(config.clone());
 
-            // Check NVENC if not configured
-            let mut nvenc_needed = false;
-            if current_config.gpu_acceleration.is_none() {
-                if video::check_nvenc_availability() {
-                    nvenc_needed = true;
-                } else {
-                    // Auto-disable if not available
-                    if let Some(ref mut c) = app.config {
-                        c.gpu_acceleration = Some(false);
-                        c.save().ok();
-                    }
-                }
-            }
+            // Check persistence
+            let p_temp_path = format!("{}/temp.json", current_config.default_output_dir);
+            // Note: logic below uses `temp_json_path` var which relied on initial config.
+            // We should update `temp_json_path` if output dir changed.
+            let effective_temp_json_path = p_temp_path.clone();
 
-            if nvenc_needed {
-                app.screen = AppScreen::GpuDetectionPrompt;
-            } else {
-                // Check persistence
-                let p_temp_path = format!("{}/temp.json", current_config.default_output_dir);
-                // Note: logic below uses `temp_json_path` var which relied on initial config.
-                // We should update `temp_json_path` if output dir changed.
-                let effective_temp_json_path = p_temp_path.clone();
-
-                if Path::new(&effective_temp_json_path).exists() {
-                    if let Ok(content) = fs::read_to_string(&effective_temp_json_path) {
-                        if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content)
-                        {
-                            app.screen =
-                                AppScreen::ResumePrompt(existing_session.youtube_url.clone());
-                            session = Some(existing_session);
-                        } else {
-                            // Corrupt session, ignore
-                            app.screen = AppScreen::UrlInput;
-                        }
+            if Path::new(&effective_temp_json_path).exists() {
+                if let Ok(content) = fs::read_to_string(&effective_temp_json_path) {
+                    if let Ok(existing_session) = serde_json::from_str::<SessionState>(&content) {
+                        app.screen = AppScreen::ResumePrompt(existing_session.youtube_url.clone());
+                        session = Some(existing_session);
                     } else {
+                        // Corrupt session, ignore
                         app.screen = AppScreen::UrlInput;
                     }
                 } else {
-                    // No session, stay at UrlInput
                     app.screen = AppScreen::UrlInput;
                 }
+            } else {
+                // No session, stay at UrlInput
+                app.screen = AppScreen::UrlInput;
             }
         }
 
@@ -501,42 +467,6 @@ async fn run_app(
 
         // Handle screen transitions
         match &app.screen {
-            AppScreen::GpuDetectionPrompt => {
-                if let Some(response) = app.confirm_response.take() {
-                    // Update config
-                    let use_gpu = response;
-                    if let Some(ref mut c) = app.config {
-                        c.gpu_acceleration = Some(use_gpu);
-                        if let Err(e) = c.save() {
-                            app.log(LogLevel::Error, format!("Failed to save settings: {}", e));
-                        } else {
-                            app.log(LogLevel::Success, "Settings saved!".to_string());
-                        }
-                    }
-
-                    // Check for session after GPU check
-                    let current_config = app.config.as_ref().unwrap(); // Safe as we just used it
-                    let p_temp_path = format!("{}/temp.json", current_config.default_output_dir);
-
-                    if Path::new(&p_temp_path).exists() {
-                        if let Ok(content) = fs::read_to_string(&p_temp_path) {
-                            if let Ok(existing_session) =
-                                serde_json::from_str::<SessionState>(&content)
-                            {
-                                app.screen =
-                                    AppScreen::ResumePrompt(existing_session.youtube_url.clone());
-                                session = Some(existing_session);
-                            } else {
-                                app.screen = AppScreen::UrlInput;
-                            }
-                        } else {
-                            app.screen = AppScreen::UrlInput;
-                        }
-                    } else {
-                        app.screen = AppScreen::UrlInput;
-                    }
-                }
-            }
             AppScreen::ResumePrompt(_) => {
                 if let Some(response) = app.confirm_response.take() {
                     if response {
@@ -765,7 +695,6 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     use_cookies: false,
                     cookies_path: "./cookies.json".to_string(),
                     shorts_config: config::ShortsConfig::default(),
-                    gpu_acceleration: None,
                     use_fast_model: true,
 
                     active_encryption_mode: security::EncryptionMode::Password,
@@ -1133,7 +1062,6 @@ async fn run_extraction(
             &moment.start_time,
             &moment.end_time,
             &output_path,
-            config.gpu_acceleration.unwrap_or(false),
         )
         .await
         {

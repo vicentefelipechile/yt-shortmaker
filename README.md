@@ -8,9 +8,8 @@ A robust, interactive CLI tool built in Rust to automate the creation of YouTube
 
 - **🖥️ Interactive TUI**: Full menu-based interface for easy navigation and control.
 - **🤖 AI-Powered Analysis**: Uses Google Gemini to identify the best, most engaging moments.
-- **⚙️ In-App Configuration**: Modify settings like output directory, GPU usage, and cookies directly from the menu.
+- **⚙️ In-App Configuration**: Modify settings like output directory, usage, and cookies directly from the menu.
 - **🔄 Session Recovery**: Automatically resumes interrupted sessions from where you left off.
-- **⚡ GPU Acceleration**: Supports NVIDIA NVENC for faster video processing.
 - **🎨 Smart Composition**: Creates layered shorts with blurred backgrounds and customizable zoom/positioning.
 - **🍪 Cookie Support**: Integrated support for `yt-dlp` cookies to handle age-restricted or premium content.
 
@@ -79,7 +78,6 @@ The application opens to a Main Menu with three options:
 You can customize the following directly in the app:
 - **Output Directory**: Where files are saved.
 - **Auto Extract**: Automatically generate shorts after analysis.
-- **GPU Acceleration**: Enable/Disable hardware encoding.
 - **Shorts Style**: Adjust background opacity and main video zoom.
 - **Cookies**: Path to your cookies file.
 
@@ -98,18 +96,6 @@ output/
 ## ⚙️ Configuration File
 
 Settings are stored in `settings.json`. While you can edit this file manually, it's recommended to use the **Configuracion** menu in the app.
-
-```json
-{
-  "google_api_keys": ["your-api-key-here"],
-  "default_output_dir": "./output",
-  "gpu_acceleration": true,
-  "shorts_config": {
-      "background_opacity": 0.4,
-      "main_video_zoom": 0.7
-  }
-}
-```
 
 ## 🎯 Moment Categories
 

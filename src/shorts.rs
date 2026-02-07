@@ -174,7 +174,6 @@ pub async fn transform_to_short(
     input_video: &str,
     output_path: &str,
     config: &ShortsConfig,
-    use_gpu: bool,
 ) -> Result<()> {
     if !Path::new(input_video).exists() {
         return Err(anyhow!("Input video not found: {}", input_video));
@@ -234,25 +233,13 @@ pub async fn transform_to_short(
     args.push("0:a?".to_string()); // Audio from main video (optional)
 
     // Output settings
-    if use_gpu {
-        args.push("-c:v".to_string());
-        args.push("h264_nvenc".to_string());
-        args.push("-preset".to_string());
-        args.push("p4".to_string());
-        args.push("-rc".to_string());
-        args.push("vbr".to_string());
-        args.push("-cq".to_string());
-        args.push("23".to_string());
-        args.push("-b:v".to_string());
-        args.push("0".to_string());
-    } else {
-        args.push("-c:v".to_string());
-        args.push("libx264".to_string());
-        args.push("-preset".to_string());
-        args.push("medium".to_string());
-        args.push("-crf".to_string());
-        args.push("23".to_string());
-    }
+    // Output settings
+    args.push("-c:v".to_string());
+    args.push("libx264".to_string());
+    args.push("-preset".to_string());
+    args.push("medium".to_string());
+    args.push("-crf".to_string());
+    args.push("23".to_string());
 
     args.push("-c:a".to_string());
     args.push("aac".to_string());
@@ -282,7 +269,6 @@ pub fn generate_preview(
     output_image: &str,
     config: &ShortsConfig,
     timestamp_secs: f64,
-    _use_gpu: bool,
 ) -> Result<()> {
     if !Path::new(input_video).exists() {
         return Err(anyhow!("Input video not found: {}", input_video));
@@ -377,7 +363,6 @@ pub async fn transform_batch(
     input_dir: &str,
     output_dir: &str,
     config: &ShortsConfig,
-    use_gpu: bool,
     progress_callback: Option<ProgressCallback>,
 ) -> Result<Vec<String>> {
     use std::fs;
@@ -408,8 +393,7 @@ pub async fn transform_batch(
             callback(i + 1, total, &file_name);
         }
 
-        match transform_to_short(input_path.to_str().unwrap(), &output_path, config, use_gpu).await
-        {
+        match transform_to_short(input_path.to_str().unwrap(), &output_path, config).await {
             Ok(_) => {
                 output_files.push(output_path);
             }

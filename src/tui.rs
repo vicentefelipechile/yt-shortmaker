@@ -79,8 +79,7 @@ pub enum AppScreen {
     Processing,
     /// Shorts generation confirmation
     ShortsConfirm(usize),
-    /// GPU Detection Prompt
-    GpuDetectionPrompt,
+
     /// Completed
     Done,
     /// API Key Manager List
@@ -110,7 +109,7 @@ pub struct LogEntry {
 /// Simple enum to represent a setting type for editing
 #[derive(Debug, Clone)]
 pub enum SettingType {
-    String,
+    // String,
     Bool,
     Float,
     Path,
@@ -261,13 +260,6 @@ impl App {
                     description: rust_i18n::t!("desc_cookies_path").to_string(),
                 },
                 SettingItem {
-                    name: "GPU Acceleration".to_string(),
-                    key: "gpu".to_string(),
-                    value: config.gpu_acceleration.unwrap_or(false).to_string(),
-                    kind: SettingType::Bool,
-                    description: rust_i18n::t!("desc_gpu").to_string(),
-                },
-                SettingItem {
                     name: "Background Opacity".to_string(),
                     key: "bg_opacity".to_string(),
                     value: config.shorts_config.background_opacity.to_string(),
@@ -306,7 +298,7 @@ impl App {
                     }
                     "use_cookies" => config.use_cookies = val.parse().unwrap_or(false),
                     "cookies_path" => config.cookies_path = val.clone(),
-                    "gpu" => config.gpu_acceleration = Some(val.parse().unwrap_or(false)),
+
                     "bg_opacity" => {
                         config.shorts_config.background_opacity = val.parse().unwrap_or(0.4)
                     }
@@ -864,22 +856,21 @@ impl App {
                 _ => {}
             },
 
-            AppScreen::ResumePrompt(_)
-            | AppScreen::FormatConfirm
-            | AppScreen::ShortsConfirm(_)
-            | AppScreen::GpuDetectionPrompt => match key {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.confirm_response = Some(true);
+            AppScreen::ResumePrompt(_) | AppScreen::FormatConfirm | AppScreen::ShortsConfirm(_) => {
+                match key {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        self.confirm_response = Some(true);
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.confirm_response = Some(false);
+                    }
+                    KeyCode::Esc => {
+                        // Back to Main Menu
+                        self.screen = AppScreen::MainMenu;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.confirm_response = Some(false);
-                }
-                KeyCode::Esc => {
-                    // Back to Main Menu
-                    self.screen = AppScreen::MainMenu;
-                }
-                _ => {}
-            },
+            }
             AppScreen::Processing => match key {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     self.screen = AppScreen::ProcessingCancelConfirm;
@@ -1052,7 +1043,7 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::FormatConfirm => render_format_confirm(frame, area),
         AppScreen::Processing => render_processing(frame, app, area),
         AppScreen::ShortsConfirm(count) => render_shorts_confirm(frame, *count, area),
-        AppScreen::GpuDetectionPrompt => render_gpu_prompt(frame, area),
+
         AppScreen::Done => render_done(frame, app, area),
         AppScreen::ApiKeysManager => render_api_keys_manager(frame, app, area),
         AppScreen::ApiKeyAddInput => render_api_key_add_input(frame, app, area),
@@ -1408,33 +1399,6 @@ fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_gpu_prompt(frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(format!(" 🚀 {} ", rust_i18n::t!("gpu_detected_title")));
-
-    let text = Text::from(vec![
-        Line::from(""),
-        Line::from(rust_i18n::t!("gpu_detected_msg")),
-        Line::from(""),
-        Line::from(rust_i18n::t!("gpu_ask")),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw(rust_i18n::t!("gpu_yes")),
-            Span::styled(
-                rust_i18n::t!("gpu_recommended"),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        Line::from(rust_i18n::t!("gpu_no")),
-        Line::from(""),
-    ]);
-
-    let paragraph = Paragraph::new(text).block(block);
-    frame.render_widget(paragraph, area);
-}
-
 fn render_setup(frame: &mut Frame, _app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1717,10 +1681,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         AppScreen::UrlInput => rust_i18n::t!("shortcuts_url"),
-        AppScreen::ResumePrompt(_)
-        | AppScreen::FormatConfirm
-        | AppScreen::ShortsConfirm(_)
-        | AppScreen::GpuDetectionPrompt => rust_i18n::t!("shortcuts_confirm"),
+        AppScreen::ResumePrompt(_) | AppScreen::FormatConfirm | AppScreen::ShortsConfirm(_) => {
+            rust_i18n::t!("shortcuts_confirm")
+        }
         AppScreen::Processing => rust_i18n::t!("shortcuts_process"),
         AppScreen::Done => rust_i18n::t!("shortcuts_done"),
         _ => rust_i18n::t!("shortcuts_default"),
@@ -1895,11 +1858,14 @@ fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
 
     let options = ["English", "Español", "Русский"];
 
+    let width = 40;
+    let height = 10;
+
     let list_area = Rect {
-        x: area.width / 2 - 10,
-        y: area.height / 2 - 3,
-        width: 20,
-        height: 7,
+        x: area.width.saturating_sub(width) / 2,
+        y: area.height.saturating_sub(height) / 2,
+        width,
+        height,
     };
 
     let list_area = list_area.intersection(inner_area);
@@ -1916,7 +1882,7 @@ fn render_language_menu(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::Cyan)
             };
-            let content = format!(" {:^16} ", text);
+            let content = format!(" {:^36} ", text);
             ListItem::new(content).style(style)
         })
         .collect();
