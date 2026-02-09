@@ -196,18 +196,33 @@ Dos videos apilados verticalmente. Útil para comparaciones o videoreacciones.
 
 ```json
 [
-  // Mitad superior
   {
     "type": "clip",
-    "position": { "x": 0, "y": 0, "width": "100%", "height": "50%" },
-    "fit": "cover",
+    "position": {
+      "x": 0,
+      "y": 0,
+      "height": "50%"
+    },
+    "crop": {
+      "x_from": 420,
+      "x_to": 1500
+    },
     "comment": "Parte superior"
   },
-  // Mitad inferior (puedes usar otro video aquí)
   {
     "type": "clip",
-    "position": { "x": 0, "y": "50%", "width": "100%", "height": "50%" },
-    "fit": "cover",
+    "position": {
+      "x": 0,
+      "y": "50%",
+      "width": "100%",
+      "height": "50%"
+    },
+    "crop": {
+      "x_from": 1300,
+      "x_to": 1920,
+      "y_from": 500,
+      "y_to": 1080
+    },
     "comment": "Parte inferior"
   }
 ]
