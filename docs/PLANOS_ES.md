@@ -72,8 +72,9 @@ Video de fondo o superpuesto (ej: gameplay de fondo, efectos de partículas).
 *   `type`: "video"
 *   `path`: Ruta al archivo de video.
 *   `position`: Posición y tamaño.
-*   `loop_video`: `true` o `false`. Si el video es más corto que el clip, se repite en bucle.
-*   `opacity`: (Opcional) Opacidad de 0.0 a 1.0 (Default: 1.0).
+*   `loop_video` (opcional, bool): Si es `true`, el video se repite en bucle. Por defecto `true`.
+*   `keep_last_frame` (opcional, bool): Si `loop_video` es `false`, mantiene el último frame congelado hasta el final. Por defecto `false`.
+*   `opacity` (opcional, float): Opacidad del video (0.0 a 1.0). Por defecto `1.0`.
 *   `fit`: (Opcional) Modo de ajuste. Valores: `"stretch"` (default), `"cover"`, `"contain"`.
 
 ### 4. Shader (`shader`)

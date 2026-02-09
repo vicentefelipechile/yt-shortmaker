@@ -231,6 +231,9 @@ pub enum PlanoObject {
         /// Whether to loop the video if shorter than main clip
         #[serde(default = "default_true")]
         loop_video: bool,
+        /// If loop_video is false, keep the last frame until the end
+        #[serde(default)]
+        keep_last_frame: bool,
         /// Opacity (0.0 - 1.0, default 1.0)
         #[serde(default = "default_opacity")]
         opacity: f32,
@@ -555,6 +558,7 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
             PlanoObject::Video {
                 position,
                 loop_video,
+                keep_last_frame,
                 opacity,
                 fit,
                 ..
@@ -565,29 +569,32 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                     let x = position.x.resolve(OUTPUT_WIDTH, w);
                     let y = position.y.resolve(OUTPUT_HEIGHT, h);
 
-                    let mut vid_filter = format!("[{}:v]", input_idx);
+                    // Start with input
+                    let mut base_filter = format!("[{}:v]", input_idx);
 
-                    // Add loop if needed
                     if *loop_video {
-                        vid_filter =
-                            format!("{}loop=-1:size=32767,setpts=N/FRAME_RATE/TB,", vid_filter);
+                        base_filter = format!("{}loop=loop=-1:size=32767:start=0,", base_filter);
+                    } else if *keep_last_frame {
+                        // tpad with infinite stop_mode=clone
+                        // stop_duration is in seconds. Use a large number.
+                        base_filter =
+                            format!("{}tpad=stop_mode=clone:stop_duration=99999,", base_filter);
                     }
 
                     // Apply Fit scaling
-                    vid_filter = match fit {
+                    let scale_filter = match fit {
                         Fit::Cover => format!(
                             "{}scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
-                            vid_filter, w, h, w, h
+                            base_filter, w, h, w, h
                         ),
                         Fit::Contain => format!(
-                            "{}scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1",
-                            vid_filter, w, h, w, h
+                            "{}scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:-1:-1:color=0x00000000",
+                            base_filter, w, h, w, h
                         ),
-                        Fit::Stretch => format!(
-                            "{}scale={}:{},setsar=1",
-                            vid_filter, w, h
-                        ),
+                        Fit::Stretch => format!("{}scale={}:{}", base_filter, w, h),
                     };
+
+                    let mut vid_filter = format!("{}setsar=1", scale_filter);
 
                     // Add opacity if < 1.0
                     if *opacity < 1.0 {
@@ -609,10 +616,6 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
         }
     }
 
-    // If loop was empty (no objects), we still have [base] as current_label ("base")
-    // We need to output something. If loop finished, next_label was "out" only if len > 0.
-    // Ideally user provided objects. If not, output black screen?
-    // If plano is empty, we must map base to out
     if plano.is_empty() {
         ctx.filters.push(format!("[base]null[out]"));
     }

@@ -72,8 +72,9 @@ Background or overlay video (e.g., background gameplay, particle effects).
 *   `type`: "video"
 *   `path`: Path to the video file.
 *   `position`: Position and size.
-*   `loop_video`: `true` or `false`. If the video is shorter than the main clip, it loops.
-*   `opacity`: (Optional) Opacity from 0.0 to 1.0 (Default: 1.0).
+*   `loop_video` (optional, bool): If `true`, the video loops if shorter than clip. Default `true`.
+*   `keep_last_frame` (optional, bool): If `loop_video` is `false`, keeps the last frame frozen until the end. Default `false`.
+*   `opacity` (optional, float): Video opacity (0.0 to 1.0). Default `1.0`.
 *   `fit`: (Optional) Fit mode. Values: `"stretch"` (default), `"cover"`, `"contain"`.
 
 ### 4. Shader (`shader`)
