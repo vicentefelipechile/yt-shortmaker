@@ -617,7 +617,7 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
     }
 
     if plano.is_empty() {
-        ctx.filters.push(format!("[base]null[out]"));
+        ctx.filters.push("[base]null[out]".to_string());
     }
 
     let filter_str = ctx.filters.join(";");
