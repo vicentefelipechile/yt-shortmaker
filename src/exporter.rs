@@ -5,6 +5,7 @@
 //! through JSON templates, allowing users to create custom layouts for their shorts.
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Local;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -454,7 +455,9 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                 let h = position.height.resolve(OUTPUT_HEIGHT);
 
                 // Start with input
-                let mut base_filter = format!("[{}:v]", clip_input_used);
+                // Fix: Force timestamp to start at 0 to avoid invisible first frame/sync issues
+                // This is critical for overlays to work correctly from frame 0
+                let mut base_filter = format!("[{}:v]setpts=PTS-STARTPTS,", clip_input_used);
 
                 // Apply user crop first if specified
                 if let Some(c) = crop {
@@ -570,7 +573,8 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                     let y = position.y.resolve(OUTPUT_HEIGHT, h);
 
                     // Start with input
-                    let mut base_filter = format!("[{}:v]", input_idx);
+                    // Fix: Force timestamp to start at 0
+                    let mut base_filter = format!("[{}:v]setpts=PTS-STARTPTS,", input_idx);
 
                     if *loop_video {
                         base_filter = format!("{}loop=loop=-1:size=32767:start=0,", base_filter);
@@ -594,7 +598,7 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                         Fit::Stretch => format!("{}scale={}:{}", base_filter, w, h),
                     };
 
-                    let mut vid_filter = format!("{}setsar=1", scale_filter);
+                    let mut vid_filter = format!("{},setsar=1", scale_filter);
 
                     // Add opacity if < 1.0
                     if *opacity < 1.0 {
@@ -959,7 +963,11 @@ pub async fn export_batch(
         }
 
         let file_name = clip_path.file_name().unwrap().to_string_lossy();
-        let output_path = format!("{}/short_{}", output_dir, file_name);
+
+        // Fix: Use timestamp instead of original filename to prevent overwrites
+        // Format: short_YYYYMMDD_HHMMSS_mmm.mp4
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f");
+        let output_path = format!("{}/short_{}.mp4", output_dir, timestamp);
 
         if let Some(ref callback) = progress_callback {
             callback(i + 1, total, &file_name);

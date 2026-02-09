@@ -13,6 +13,7 @@ mod types;
 mod video;
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use config::AppConfig;
 use crossterm::event::{self, Event, KeyEventKind};
 use gemini::GeminiClient;
@@ -140,7 +141,15 @@ async fn handle_cli_command(args: &[String]) -> Result<()> {
             let output_path = args
                 .get(3)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}_short.mp4", video_path.trim_end_matches(".mp4")));
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    let timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f");
+                    format!(
+                        "{}_short_{}.mp4",
+                        video_path.trim_end_matches(".mp4"),
+                        timestamp
+                    )
+                });
 
             println!("🎬 Transforming to YouTube Short...");
             println!("   Input: {}", video_path);
