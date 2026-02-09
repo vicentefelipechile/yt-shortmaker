@@ -3,7 +3,7 @@
 //! using Google Gemini AI for intelligent content analysis.
 
 mod config;
-
+mod exporter;
 mod gemini;
 mod security;
 mod setup;
@@ -368,6 +368,7 @@ async fn run_app(
     let mut temp_dir = String::new();
     let mut custom_format: Option<String> = None;
     let mut processing_started = false;
+    let mut export_processing_started = false;
     let mut previous_screen = app.screen.clone();
 
     loop {
@@ -678,6 +679,77 @@ async fn run_app(
             }
             AppScreen::Done => {
                 // Already handled by key press
+            }
+            AppScreen::ExportProcessing => {
+                if !export_processing_started {
+                    export_processing_started = true;
+
+                    // Get export data from app state
+                    let tx_clone = tx.clone();
+                    let folders = app.export_clip_folders.clone();
+                    let plano = app.export_plano.clone();
+                    let output_dir = app.export_output_dir.clone().unwrap_or_default();
+                    let cancellation_token = app.cancellation_token.clone();
+
+                    // Reset cancellation token
+                    cancellation_token.store(false, Ordering::Relaxed);
+
+                    app.log(
+                        LogLevel::Info,
+                        format!("Iniciando exportación de {} carpetas", folders.len()),
+                    );
+
+                    tokio::spawn(async move {
+                        let _ = tx_clone.send(AppMessage::Status("Buscando clips...".to_string()));
+
+                        // Create separate sender for progress callback (due to closure move)
+                        let tx_progress = tx_clone.clone();
+                        let tx_log = tx_clone.clone();
+
+                        let result = exporter::export_batch(
+                            &folders,
+                            &plano,
+                            &output_dir,
+                            Some(Box::new(move |current, total, name| {
+                                let progress = if total > 0 {
+                                    current as f64 / total as f64
+                                } else {
+                                    0.0
+                                };
+                                let _ = tx_progress.send(AppMessage::Progress(
+                                    progress,
+                                    format!("Exportando {}/{}: {}", current, total, name),
+                                ));
+                            })),
+                            Some(Box::new(move |level, msg| {
+                                let app_level = match level {
+                                    exporter::ExportLogLevel::Info => LogLevel::Info,
+                                    exporter::ExportLogLevel::Success => LogLevel::Success,
+                                    exporter::ExportLogLevel::Warning => LogLevel::Warning,
+                                    exporter::ExportLogLevel::Error => LogLevel::Error,
+                                };
+                                let _ = tx_log.send(AppMessage::Log(app_level, msg));
+                            })),
+                            cancellation_token,
+                        )
+                        .await;
+
+                        match result {
+                            Ok(exported_paths) => {
+                                let _ = tx_clone.send(AppMessage::Complete(format!(
+                                    "✅ Exportados {} clips a {}",
+                                    exported_paths.len(),
+                                    output_dir
+                                )));
+                                let _ = tx_clone.send(AppMessage::Finished);
+                            }
+                            Err(e) => {
+                                let _ = tx_clone.send(AppMessage::Error(format!("Error: {}", e)));
+                                let _ = tx_clone.send(AppMessage::Finished);
+                            }
+                        }
+                    });
+                }
             }
             _ => {}
         }

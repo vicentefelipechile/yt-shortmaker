@@ -19,7 +19,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
@@ -96,6 +96,18 @@ pub enum AppScreen {
     LanguageMenu,
     /// Confirmation for cancelling processing
     ProcessingCancelConfirm,
+    /// Export shorts main screen
+    ExportShorts,
+    /// Select folders containing clips
+    ExportSelectFolders,
+    /// Select or create plano template
+    ExportSelectPlano,
+    /// Preview the export result
+    ExportPreview,
+    /// Export processing
+    ExportProcessing,
+    /// Confirmation for cancelling export processing
+    ExportProcessingCancellationConfirm,
 }
 
 /// Log entry
@@ -188,6 +200,22 @@ pub struct App {
 
     /// Cancellation token for background tasks
     pub cancellation_token: Arc<AtomicBool>,
+
+    // -- Export Shorts State --
+    /// Selected folders containing clips
+    pub export_clip_folders: Vec<String>,
+    /// Selected plano file path
+    pub export_plano_path: Option<String>,
+    /// Loaded plano objects
+    pub export_plano: Vec<crate::exporter::PlanoObject>,
+    /// Export folder selection index
+    pub export_folder_index: usize,
+    /// Path to generated preview image
+    pub export_preview_path: Option<String>,
+    /// Output directory for exported shorts
+    pub export_output_dir: Option<String>,
+    /// Video path for preview (instead of fallback image)
+    pub export_preview_video_path: Option<String>,
 }
 
 impl App {
@@ -224,6 +252,13 @@ impl App {
             settings_items: Vec::new(),
             api_keys_index: 0,
             cancellation_token: Arc::new(AtomicBool::new(false)),
+            export_clip_folders: Vec::new(),
+            export_plano_path: None,
+            export_plano: Vec::new(),
+            export_folder_index: 0,
+            export_preview_path: None,
+            export_output_dir: None,
+            export_preview_video_path: None,
         }
     }
 
@@ -693,11 +728,11 @@ impl App {
                     if self.menu_index > 0 {
                         self.menu_index -= 1;
                     } else {
-                        self.menu_index = 5; // Loop to bottom
+                        self.menu_index = 6; // Loop to bottom (7 items: 0-6)
                     }
                 }
                 KeyCode::Down => {
-                    if self.menu_index < 5 {
+                    if self.menu_index < 6 {
                         self.menu_index += 1;
                     } else {
                         self.menu_index = 0; // Loop to top
@@ -712,6 +747,12 @@ impl App {
                             self.moments.clear();
                         }
                         1 => {
+                            // Export Shorts
+                            self.screen = AppScreen::ExportShorts;
+                            self.export_clip_folders.clear();
+                            self.export_folder_index = 0;
+                        }
+                        2 => {
                             if let Some(config) = &self.config {
                                 self.language_index = match config.language.as_str() {
                                     "es" => 1,
@@ -721,12 +762,12 @@ impl App {
                             }
                             self.screen = AppScreen::LanguageMenu;
                         }
-                        2 => {
+                        3 => {
                             self.reload_settings_items();
                             self.settings_index = 0;
                             self.screen = AppScreen::SettingsEditor;
                         }
-                        3 => {
+                        4 => {
                             // Security
                             // Initialize input state
                             if let Some(config) = &self.config {
@@ -741,12 +782,12 @@ impl App {
                             }
                             self.screen = AppScreen::SecuritySetup;
                         }
-                        4 => {
+                        5 => {
                             // API Keys
                             self.screen = AppScreen::ApiKeysManager;
                             self.api_keys_index = 0;
                         }
-                        5 => self.should_quit = true, // Exit
+                        6 => self.should_quit = true, // Exit
                         _ => {}
                     }
                 }
@@ -895,6 +936,309 @@ impl App {
                     self.moments.clear();
                     self.input.clear();
                     // self.should_quit = true;
+                }
+                _ => {}
+            },
+            // Export Shorts Key Handlers
+            AppScreen::ExportShorts => match key {
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    // Navigate to folder selection screen
+                    self.screen = AppScreen::ExportSelectFolders;
+                    self.export_folder_index = 0;
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    self.screen = AppScreen::ExportSelectPlano;
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    // Select video for preview
+                    self.log(
+                        LogLevel::Info,
+                        rust_i18n::t!("export_selecting_output")
+                            .to_string()
+                            .replace("output folder", "preview video"), // Reuse i18n logic or add new key if needed, for now stick to simple
+                    );
+
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Video", &["mp4", "mkv", "webm", "mov"])
+                        .pick_file()
+                    {
+                        let path_str = path.to_string_lossy().to_string();
+                        self.export_preview_video_path = Some(path_str.clone());
+                        self.log(LogLevel::Success, format!("Video preview: {}", path_str));
+                    }
+                }
+                KeyCode::Char('v') | KeyCode::Char('V') => {
+                    // Auto-reload plano if loaded from file
+                    if let Some(path) = &self.export_plano_path {
+                        match crate::exporter::load_plano(path) {
+                            Ok(plano) => {
+                                self.export_plano = plano;
+                                self.log(
+                                    LogLevel::Info,
+                                    rust_i18n::t!("export_plano_reloaded", path = path).to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                self.log(
+                                    LogLevel::Error,
+                                    rust_i18n::t!(
+                                        "export_plano_reload_error",
+                                        error = e.to_string()
+                                    )
+                                    .to_string(),
+                                );
+                            }
+                        }
+                    }
+
+                    // Generate preview
+                    if !self.export_plano.is_empty() {
+                        self.log(
+                            LogLevel::Info,
+                            rust_i18n::t!("export_generating_preview").to_string(),
+                        );
+
+                        // Use unique filename to force image viewer to open new instance
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let output_dir = std::env::temp_dir();
+                        let preview_filename = format!("yt_shortmaker_preview_{}.png", timestamp);
+                        let preview_path = output_dir.join(preview_filename);
+                        let preview_str = preview_path.to_string_lossy().to_string();
+
+                        let result = if let Some(video_path) = &self.export_preview_video_path {
+                            crate::exporter::generate_preview_from_video(
+                                video_path,
+                                &self.export_plano,
+                                &preview_str,
+                            )
+                        } else {
+                            crate::exporter::generate_preview_embedded(
+                                &self.export_plano,
+                                &preview_str,
+                            )
+                        };
+
+                        match result {
+                            Ok(_) => {
+                                self.export_preview_path = Some(preview_str.clone());
+                                self.log(
+                                    LogLevel::Success,
+                                    rust_i18n::t!("export_preview_generated", path = preview_str)
+                                        .to_string(),
+                                );
+
+                                self.log(
+                                    LogLevel::Info,
+                                    rust_i18n::t!("export_opening_preview").to_string(),
+                                );
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let _ = std::process::Command::new("cmd")
+                                        .args(["/C", "start", "", &preview_str])
+                                        .spawn();
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = std::process::Command::new("open")
+                                        .arg(&preview_str)
+                                        .spawn();
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(&preview_str)
+                                        .spawn();
+                                }
+                            }
+                            Err(e) => {
+                                self.log(
+                                    LogLevel::Error,
+                                    rust_i18n::t!("export_preview_error", error = e.to_string())
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        self.screen = AppScreen::ExportPreview;
+                    } else {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_template_first").to_string(),
+                        );
+                    }
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') => {
+                    // Select output directory
+                    self.log(
+                        LogLevel::Info,
+                        rust_i18n::t!("export_selecting_output").to_string(),
+                    );
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        let path_str = path.to_string_lossy().to_string();
+                        self.export_output_dir = Some(path_str.clone());
+                        self.log(
+                            LogLevel::Success,
+                            rust_i18n::t!("export_output_set", path = path_str).to_string(),
+                        );
+                    }
+                }
+                KeyCode::Enter => {
+                    // Validate all requirements before starting export
+                    if self.export_clip_folders.is_empty() {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_clips_first").to_string(),
+                        );
+                    } else if self.export_plano.is_empty() {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_template").to_string(),
+                        );
+                    } else if self.export_output_dir.is_none() {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_output_first").to_string(),
+                        );
+                    } else {
+                        // All requirements met - start export
+                        let num_folders = self.export_clip_folders.len();
+                        let output = self.export_output_dir.as_ref().unwrap().clone();
+                        self.log(
+                            LogLevel::Info,
+                            rust_i18n::t!("export_starting", count = num_folders).to_string(),
+                        );
+                        self.log(
+                            LogLevel::Info,
+                            rust_i18n::t!("export_output_label", path = output).to_string(),
+                        );
+                        self.screen = AppScreen::ExportProcessing;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::MainMenu;
+                }
+                _ => {}
+            },
+            AppScreen::ExportSelectFolders => match key {
+                KeyCode::Up => {
+                    if self.export_folder_index > 0 {
+                        self.export_folder_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if !self.export_clip_folders.is_empty()
+                        && self.export_folder_index < self.export_clip_folders.len() - 1
+                    {
+                        self.export_folder_index += 1;
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.export_clip_folders
+                            .push(path.to_string_lossy().to_string());
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if !self.export_clip_folders.is_empty() {
+                        self.export_clip_folders.remove(self.export_folder_index);
+                        if self.export_folder_index > 0
+                            && self.export_folder_index >= self.export_clip_folders.len()
+                        {
+                            self.export_folder_index -= 1;
+                        }
+                    }
+                }
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.screen = AppScreen::ExportShorts;
+                }
+                _ => {}
+            },
+            AppScreen::ExportSelectPlano => match key {
+                KeyCode::Char('l') | KeyCode::Char('L') => {
+                    // Load existing plano file
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                    {
+                        let path_str = path.to_string_lossy().to_string();
+                        match crate::exporter::load_plano(&path_str) {
+                            Ok(plano) => {
+                                self.export_plano_path = Some(path_str);
+                                self.export_plano = plano;
+                                self.log(LogLevel::Success, "Plantilla cargada".to_string());
+                            }
+                            Err(e) => {
+                                self.log(
+                                    LogLevel::Error,
+                                    format!("Error cargando plantilla: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    // Create new default plano
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_file_name("plano.json")
+                        .save_file()
+                    {
+                        let path_str = path.to_string_lossy().to_string();
+                        let default_plano = crate::exporter::create_default_plano();
+                        if let Err(e) = crate::exporter::save_plano(&path_str, &default_plano) {
+                            self.log(LogLevel::Error, format!("Error guardando plantilla: {}", e));
+                        } else {
+                            self.export_plano_path = Some(path_str);
+                            self.export_plano = default_plano;
+                            self.log(LogLevel::Success, "Plantilla creada".to_string());
+                        }
+                    }
+                }
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    // Open in external editor
+                    if let Some(ref path) = self.export_plano_path {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let _ = std::process::Command::new("notepad").arg(path).spawn();
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    self.screen = AppScreen::ExportShorts;
+                }
+                _ => {}
+            },
+            AppScreen::ExportPreview => match key {
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.screen = AppScreen::ExportShorts;
+                }
+                _ => {}
+            },
+            AppScreen::ExportProcessing => {
+                if let KeyCode::Esc = key {
+                    self.screen = AppScreen::ExportProcessingCancellationConfirm;
+                }
+            }
+            AppScreen::ExportProcessingCancellationConfirm => match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    // Confirm cancellation
+                    self.cancellation_token.store(true, Ordering::Relaxed);
+                    self.log(
+                        LogLevel::Warning,
+                        rust_i18n::t!("export_cancelling_log").to_string(),
+                    );
+                    // We don't change screen here immediately to allow logs to show cancellation progress
+                    self.screen = AppScreen::ExportProcessing;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Abort cancellation
+                    self.screen = AppScreen::ExportProcessing;
                 }
                 _ => {}
             },
@@ -1052,7 +1396,71 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
         AppScreen::PasswordInput => render_password_input(frame, app, area),
         AppScreen::LanguageMenu => render_language_menu(frame, app, area),
         AppScreen::ProcessingCancelConfirm => render_processing_cancel_confirm(frame, area),
+        AppScreen::ExportShorts => render_export_shorts(frame, app, area),
+        AppScreen::ExportSelectFolders => render_export_select_folders(frame, app, area),
+        AppScreen::ExportSelectPlano => render_export_select_plano(frame, app, area),
+        AppScreen::ExportPreview => render_export_preview(frame, app, area),
+        AppScreen::ExportProcessing => render_export_processing(frame, app, area),
+        AppScreen::ExportProcessingCancellationConfirm => {
+            render_export_processing(frame, app, area); // Render background
+            render_export_processing_cancel_confirm(frame, app, area); // Render popup overlay
+        }
     }
+}
+
+fn render_export_processing(frame: &mut Frame, app: &App, area: Rect) {
+    render_processing(frame, app, area)
+}
+
+fn render_export_processing_cancel_confirm(frame: &mut Frame, _app: &App, area: Rect) {
+    // Use fixed dimensions for better readability on small screens
+    let width = 60.min(area.width);
+    let height = 12.min(area.height);
+
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let block = Block::default()
+        .title(format!(
+            " {} ",
+            rust_i18n::t!("export_cancel_confirm_title")
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Reset));
+
+    let text = vec![
+        Line::from(vec![Span::styled(
+            rust_i18n::t!("export_cancel_confirm_message").to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(rust_i18n::t!("export_cancel_confirm_submessage").to_string()),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                rust_i18n::t!("export_cancel_yes").to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                rust_i18n::t!("export_cancel_no").to_string(),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn render_api_keys_manager(frame: &mut Frame, app: &App, area: Rect) {
@@ -1250,6 +1658,7 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
     // Dynamic localization for options
     let options = [
         rust_i18n::t!("menu_start"),
+        rust_i18n::t!("menu_export_shorts"),
         rust_i18n::t!("language"),
         rust_i18n::t!("menu_settings"),
         rust_i18n::t!("menu_security"),
@@ -1259,9 +1668,9 @@ fn render_main_menu(frame: &mut Frame, app: &App, area: Rect) {
 
     let list_area = Rect {
         x: area.width / 2 - 15,
-        y: area.height / 2 - 7, // Adjusted for extra item
+        y: area.height / 2 - 8, // Adjusted for extra item
         width: 30,
-        height: 14, // Adjusted for extra item
+        height: 16, // Adjusted for extra item (7 items)
     };
 
     // Ensure we don't go out of bounds if terminal is small
@@ -1974,4 +2383,280 @@ fn render_processing_cancel_confirm(frame: &mut Frame, area: Rect) {
 
     let opts = Paragraph::new(options).alignment(Alignment::Center);
     frame.render_widget(opts, chunks[2]);
+}
+
+// ============================================================================
+// Export Shorts Screens
+// ============================================================================
+
+fn render_export_shorts(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" 📤 {} ", rust_i18n::t!("export_title")));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(5), // Folders info
+            Constraint::Length(3), // Plano info
+            Constraint::Length(3), // Output folder info
+            Constraint::Min(6),    // Instructions
+        ])
+        .split(inner_area);
+
+    // Title
+    let title = Paragraph::new(rust_i18n::t!("export_select_folders"))
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center);
+    frame.render_widget(title, chunks[0]);
+
+    // Folders count
+    let folders_text = format!(
+        "{}: {}",
+        rust_i18n::t!("export_folders_count"),
+        app.export_clip_folders.len()
+    );
+    let folders = Paragraph::new(folders_text)
+        .style(Style::default().fg(Color::Green))
+        .alignment(Alignment::Center);
+    frame.render_widget(folders, chunks[1]);
+
+    // Plano status
+    let plano_text = match &app.export_plano_path {
+        Some(path) => format!("📋 {}", path),
+        None => rust_i18n::t!("export_no_plano").to_string(),
+    };
+    let plano = Paragraph::new(plano_text)
+        .style(Style::default().fg(Color::Yellow))
+        .alignment(Alignment::Center);
+    frame.render_widget(plano, chunks[2]);
+
+    // Output folder status
+    let output_text = match &app.export_output_dir {
+        Some(path) => rust_i18n::t!("export_output_selected", path = path).to_string(),
+        None => rust_i18n::t!("export_output_not_selected").to_string(),
+    };
+    let output = Paragraph::new(output_text)
+        .style(Style::default().fg(if app.export_output_dir.is_some() {
+            Color::Green
+        } else {
+            Color::Red
+        }))
+        .alignment(Alignment::Center);
+    frame.render_widget(output, chunks[3]);
+
+    // Instructions
+    let instructions = Text::from(vec![
+        Line::from(vec![
+            Span::styled("[F] ", Style::default().fg(Color::Cyan)),
+            Span::raw(rust_i18n::t!("export_add_folder")),
+        ]),
+        Line::from(vec![
+            Span::styled("[P] ", Style::default().fg(Color::Cyan)),
+            Span::raw(rust_i18n::t!("export_select_plano")),
+        ]),
+        Line::from(vec![
+            Span::styled("[O] ", Style::default().fg(Color::Cyan)),
+            Span::raw(rust_i18n::t!("export_output_dir")),
+        ]),
+        Line::from(vec![
+            Span::styled("[T] ", Style::default().fg(Color::Magenta)),
+            Span::raw(rust_i18n::t!("export_select_preview_video")),
+        ]),
+        Line::from(vec![
+            Span::styled("[V] ", Style::default().fg(Color::Cyan)),
+            Span::raw(rust_i18n::t!("export_preview")),
+        ]),
+        Line::from(vec![
+            Span::styled("[Enter] ", Style::default().fg(Color::Green)),
+            Span::raw(rust_i18n::t!("export_start")),
+        ]),
+        Line::from(vec![
+            Span::styled("[Esc] ", Style::default().fg(Color::Red)),
+            Span::raw(rust_i18n::t!("back")),
+        ]),
+    ]);
+    let instr = Paragraph::new(instructions)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(instr, chunks[4]);
+}
+
+fn render_export_select_folders(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" 📁 {} ", rust_i18n::t!("export_select_folders")));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Min(10),   // List of folders
+            Constraint::Length(4), // Help
+        ])
+        .split(inner_area);
+
+    // List of folders
+    let items: Vec<ListItem> = app
+        .export_clip_folders
+        .iter()
+        .enumerate()
+        .map(|(i, folder)| {
+            let style = if i == app.export_folder_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(format!(" 📂 {} ", folder)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Carpetas "));
+    frame.render_widget(list, chunks[0]);
+
+    // Help
+    let help = Paragraph::new("[A] Agregar  [D] Eliminar  [Enter] Confirmar  [Esc] Atrás")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, chunks[1]);
+}
+
+fn render_export_select_plano(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(format!(" 📋 {} ", rust_i18n::t!("export_select_plano")));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(4), // Current plano
+            Constraint::Min(6),    // Options
+            Constraint::Length(3), // Help
+        ])
+        .split(inner_area);
+
+    // Current plano
+    let current = match &app.export_plano_path {
+        Some(path) => format!("📋 Actual: {}", path),
+        None => "❌ No hay plantilla seleccionada".to_string(),
+    };
+    let current_para = Paragraph::new(current)
+        .style(Style::default().fg(Color::White))
+        .alignment(Alignment::Center);
+    frame.render_widget(current_para, chunks[0]);
+
+    // Options
+    let options = Text::from(vec![
+        Line::from(vec![
+            Span::styled("[L] ", Style::default().fg(Color::Cyan)),
+            Span::raw("Cargar plantilla existente (.json)"),
+        ]),
+        Line::from(vec![
+            Span::styled("[N] ", Style::default().fg(Color::Green)),
+            Span::raw("Crear nueva plantilla por defecto"),
+        ]),
+        Line::from(vec![
+            Span::styled("[E] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Editar plantilla actual (abre en editor)"),
+        ]),
+    ]);
+    let opts = Paragraph::new(options)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(opts, chunks[1]);
+
+    // Help
+    let help = Paragraph::new("[Esc] Volver")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+    frame.render_widget(help, chunks[2]);
+}
+
+fn render_export_preview(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(format!(" 👁 {} ", rust_i18n::t!("export_preview_title")));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(3), // Status
+            Constraint::Min(10),   // Plano layers
+            Constraint::Length(3), // Actions
+        ])
+        .split(inner_area);
+
+    // Status
+    let status = if app.export_plano.is_empty() {
+        "⚠️ No hay plantilla cargada".to_string()
+    } else {
+        format!("✅ Plantilla con {} capas", app.export_plano.len())
+    };
+    let status_para = Paragraph::new(status)
+        .style(Style::default().fg(Color::White))
+        .alignment(Alignment::Center);
+    frame.render_widget(status_para, chunks[0]);
+
+    // Plano layers list
+    let items: Vec<ListItem> = app
+        .export_plano
+        .iter()
+        .enumerate()
+        .map(|(i, obj)| {
+            let (icon, name) = match obj {
+                crate::exporter::PlanoObject::Clip { .. } => ("🎬", "Clip"),
+                crate::exporter::PlanoObject::Image { path, .. } => ("🖼️", path.as_str()),
+                crate::exporter::PlanoObject::Shader { .. } => ("✨", "Shader"),
+                crate::exporter::PlanoObject::Video { path, .. } => ("📹", path.as_str()),
+            };
+            ListItem::new(format!(
+                " {} Capa {}: {} - {} ",
+                icon,
+                i,
+                match obj {
+                    crate::exporter::PlanoObject::Clip { .. } => "Clip Original",
+                    crate::exporter::PlanoObject::Image { .. } => "Imagen",
+                    crate::exporter::PlanoObject::Shader { .. } => "Shader",
+                    crate::exporter::PlanoObject::Video { .. } => "Video",
+                },
+                name
+            ))
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Capas "));
+    frame.render_widget(list, chunks[1]);
+
+    // Actions
+    let actions = Paragraph::new("[G] Generar preview (imagen)  [Enter] Volver  [Esc] Cancelar")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+    frame.render_widget(actions, chunks[2]);
 }
