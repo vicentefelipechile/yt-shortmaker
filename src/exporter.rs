@@ -44,8 +44,16 @@ impl PositionValue {
         match self {
             PositionValue::Pixels(px) => *px,
             PositionValue::Keyword(kw) => {
-                if kw.to_lowercase() == "center" {
+                let kw_lower = kw.to_lowercase();
+                if kw_lower == "center" {
                     ((container_size - element_size) / 2) as i32
+                } else if kw_lower.ends_with('%') {
+                    // Parse percentage
+                    if let Ok(pct) = kw_lower.trim_end_matches('%').parse::<f32>() {
+                        ((container_size as f32) * (pct / 100.0)) as i32
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 }
@@ -158,6 +166,22 @@ fn default_blur_intensity() -> u32 {
     20
 }
 
+/// Scaling mode for the video/clip
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Fit {
+    /// Cover the area (crop excess), maintaining aspect ratio
+    Cover,
+    /// Contain within the area (add letterbox/pillarbox), maintaining aspect ratio
+    Contain,
+    /// Stretch to fill the area (distort), ignoring aspect ratio
+    Stretch,
+}
+
+fn default_fit() -> Fit {
+    Fit::Stretch
+}
+
 /// A single object in the plano (template)
 /// Order in the array determines layer order (index 0 = back, higher = front)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -169,6 +193,9 @@ pub enum PlanoObject {
         position: Position,
         #[serde(default)]
         crop: Option<Crop>,
+        /// How to fit the video into the position box
+        #[serde(default = "default_fit")]
+        fit: Fit,
         /// User comment (ignored during processing)
         #[serde(default)]
         comment: Option<String>,
@@ -204,6 +231,12 @@ pub enum PlanoObject {
         /// Whether to loop the video if shorter than main clip
         #[serde(default = "default_true")]
         loop_video: bool,
+        /// Opacity (0.0 - 1.0, default 1.0)
+        #[serde(default = "default_opacity")]
+        opacity: f32,
+        /// How to fit the video into the position box
+        #[serde(default = "default_fit")]
+        fit: Fit,
         /// User comment (ignored during processing)
         #[serde(default)]
         comment: Option<String>,
@@ -290,6 +323,7 @@ pub fn create_default_plano() -> Vec<PlanoObject> {
                 height: SizeValue::Keyword("full".to_string()),
             },
             crop: None,
+            fit: Fit::Cover,
             comment: Some("Fondo desenfocado del clip original".to_string()),
         },
         // Layer 1: Blur shader on background
@@ -312,6 +346,7 @@ pub fn create_default_plano() -> Vec<PlanoObject> {
                 height: SizeValue::Pixels(1200),
             },
             crop: None,
+            fit: Fit::Cover,
             comment: Some("Video principal del clip".to_string()),
         },
     ]
@@ -391,9 +426,12 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
         input_mapping.insert(*plano_idx, i + 1); // +1 because main clip is 0
     }
 
-    // Second pass: build filters
-    let mut current_label = String::new();
-    let mut first_layer = true;
+    let mut current_label = "base".to_string();
+
+    ctx.filters.push(format!(
+        "color=c=black:s={}x{}:r=60:d=36000[base]",
+        OUTPUT_WIDTH, OUTPUT_HEIGHT
+    ));
 
     for (idx, obj) in plano.iter().enumerate() {
         let next_label = if idx == plano.len() - 1 {
@@ -403,20 +441,21 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
         };
 
         match obj {
-            PlanoObject::Clip { position, crop, .. } => {
+            PlanoObject::Clip {
+                position,
+                crop,
+                fit,
+                ..
+            } => {
                 let w = position.width.resolve(OUTPUT_WIDTH);
                 let h = position.height.resolve(OUTPUT_HEIGHT);
 
-                let mut scale_filter = format!(
-                    "[{}:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
-                    clip_input_used, w, h, w, h
-                );
+                // Start with input
+                let mut base_filter = format!("[{}:v]", clip_input_used);
 
-                // Apply crop if specified
+                // Apply user crop first if specified
                 if let Some(c) = crop {
                     if c.is_specified() {
-                        // This is a user-defined crop on the source video
-                        // We'll need to adjust the scale approach
                         let x_from = c.x_from.unwrap_or(0);
                         let x_to = c.x_to.unwrap_or(0);
                         let y_from = c.y_from.unwrap_or(0);
@@ -425,37 +464,43 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                         if x_to > x_from {
                             let crop_w = x_to - x_from;
                             let crop_x = x_from;
-                            scale_filter = format!(
-                                "[{}:v]crop={}:ih:{}:0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
-                                clip_input_used, crop_w, crop_x, w, h, w, h
-                            );
+                            base_filter =
+                                format!("{}crop={}:ih:{}:0,", base_filter, crop_w, crop_x);
                         }
                         if y_to > y_from {
                             let crop_h = y_to - y_from;
                             let crop_y = y_from;
-                            scale_filter = format!(
-                                "[{}:v]crop=iw:{}:0:{},scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
-                                clip_input_used, crop_h, crop_y, w, h, w, h
-                            );
+                            base_filter =
+                                format!("{}crop=iw:{}:{}:{},", base_filter, crop_h, 0, crop_y);
                         }
                     }
                 }
 
-                if first_layer {
-                    // First layer becomes base
-                    ctx.filters
-                        .push(format!("{}[{}]", scale_filter, next_label));
-                    first_layer = false;
-                } else {
-                    // Overlay on previous
-                    let x = position.x.resolve(OUTPUT_WIDTH, w);
-                    let y = position.y.resolve(OUTPUT_HEIGHT, h);
-                    ctx.filters.push(format!("{}[tmp{}]", scale_filter, idx));
-                    ctx.filters.push(format!(
-                        "[{}][tmp{}]overlay={}:{}[{}]",
-                        current_label, idx, x, y, next_label
-                    ));
-                }
+                // Now apply scaling based on Fit mode
+                let scale_filter = match fit {
+                    Fit::Cover => format!(
+                        "{}scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
+                        base_filter, w, h, w, h
+                    ),
+                    Fit::Contain => format!(
+                        "{}scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                        base_filter, w, h, w, h
+                    ),
+                    Fit::Stretch => format!(
+                        "{}scale={}:{},setsar=1",
+                        base_filter, w, h
+                    ),
+                };
+
+                // Overlay on previous
+                let x = position.x.resolve(OUTPUT_WIDTH, w);
+                let y = position.y.resolve(OUTPUT_HEIGHT, h);
+
+                ctx.filters.push(format!("{}[tmp{}]", scale_filter, idx));
+                ctx.filters.push(format!(
+                    "[{}][tmp{}]overlay={}:{}[{}]",
+                    current_label, idx, x, y, next_label
+                ));
 
                 current_label = next_label;
             }
@@ -463,25 +508,16 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
             PlanoObject::Shader {
                 effect, position, ..
             } => {
-                let w = position.width.resolve(OUTPUT_WIDTH);
-                let h = position.height.resolve(OUTPUT_HEIGHT);
+                let _w = position.width.resolve(OUTPUT_WIDTH);
+                let _h = position.height.resolve(OUTPUT_HEIGHT);
 
                 match effect {
                     ShaderEffect::Blur { intensity } => {
-                        if first_layer {
-                            // Apply blur to source
-                            ctx.filters.push(format!(
-                                "[0:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},boxblur={}:{}[{}]",
-                                w, h, w, h, intensity, intensity, next_label
-                            ));
-                            first_layer = false;
-                        } else {
-                            // Apply blur to current composition
-                            ctx.filters.push(format!(
-                                "[{}]boxblur={}:{}[{}]",
-                                current_label, intensity, intensity, next_label
-                            ));
-                        }
+                        // Apply blur to current composition
+                        ctx.filters.push(format!(
+                            "[{}]boxblur={}:{}[{}]",
+                            current_label, intensity, intensity, next_label
+                        ));
                     }
                 }
                 current_label = next_label;
@@ -506,16 +542,11 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                         );
                     }
 
-                    if first_layer {
-                        ctx.filters.push(format!("{}[{}]", img_filter, next_label));
-                        first_layer = false;
-                    } else {
-                        ctx.filters.push(format!("{}[img{}]", img_filter, idx));
-                        ctx.filters.push(format!(
-                            "[{}][img{}]overlay={}:{}[{}]",
-                            current_label, idx, x, y, next_label
-                        ));
-                    }
+                    ctx.filters.push(format!("{}[img{}]", img_filter, idx));
+                    ctx.filters.push(format!(
+                        "[{}][img{}]overlay={}:{}[{}]",
+                        current_label, idx, x, y, next_label
+                    ));
 
                     current_label = next_label;
                 }
@@ -524,6 +555,8 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
             PlanoObject::Video {
                 position,
                 loop_video,
+                opacity,
+                fit,
                 ..
             } => {
                 if let Some(&input_idx) = input_mapping.get(&idx) {
@@ -540,21 +573,35 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
                             format!("{}loop=-1:size=32767,setpts=N/FRAME_RATE/TB,", vid_filter);
                     }
 
-                    vid_filter = format!(
-                        "{}scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
-                        vid_filter, w, h, w, h
-                    );
+                    // Apply Fit scaling
+                    vid_filter = match fit {
+                        Fit::Cover => format!(
+                            "{}scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}",
+                            vid_filter, w, h, w, h
+                        ),
+                        Fit::Contain => format!(
+                            "{}scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                            vid_filter, w, h, w, h
+                        ),
+                        Fit::Stretch => format!(
+                            "{}scale={}:{},setsar=1",
+                            vid_filter, w, h
+                        ),
+                    };
 
-                    if first_layer {
-                        ctx.filters.push(format!("{}[{}]", vid_filter, next_label));
-                        first_layer = false;
-                    } else {
-                        ctx.filters.push(format!("{}[vid{}]", vid_filter, idx));
-                        ctx.filters.push(format!(
-                            "[{}][vid{}]overlay={}:{}[{}]",
-                            current_label, idx, x, y, next_label
-                        ));
+                    // Add opacity if < 1.0
+                    if *opacity < 1.0 {
+                        vid_filter = format!(
+                            "{},format=rgba,colorchannelmixer=aa={}",
+                            vid_filter, opacity
+                        );
                     }
+
+                    ctx.filters.push(format!("{}[vid{}]", vid_filter, idx));
+                    ctx.filters.push(format!(
+                        "[{}][vid{}]overlay={}:{}[{}]",
+                        current_label, idx, x, y, next_label
+                    ));
 
                     current_label = next_label;
                 }
@@ -562,15 +609,17 @@ pub fn build_ffmpeg_filter(plano: &[PlanoObject], clip_path: &str) -> (String, V
         }
     }
 
-    // If we never set any layers, create a simple passthrough
-    if first_layer {
-        ctx.filters.push(format!(
-            "[0:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}[out]",
-            OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_WIDTH, OUTPUT_HEIGHT
-        ));
+    // If loop was empty (no objects), we still have [base] as current_label ("base")
+    // We need to output something. If loop finished, next_label was "out" only if len > 0.
+    // Ideally user provided objects. If not, output black screen?
+    // If plano is empty, we must map base to out
+    if plano.is_empty() {
+        ctx.filters.push(format!("[base]null[out]"));
     }
 
-    (ctx.filters.join(";"), inputs)
+    let filter_str = ctx.filters.join(";");
+
+    (filter_str, inputs)
 }
 
 // ============================================================================
@@ -765,13 +814,35 @@ pub async fn export_clip(
 
     args.push("-c:a".to_string());
     args.push("aac".to_string());
+
     args.push("-b:a".to_string());
     args.push("192k".to_string());
+
+    // 4. Limit output duration to the length of the main clip
+    // This prevents infinite loops if background video is looping
+    // CRITICAL: We MUST have a duration, otherwise the 10h black canvas will make the video 10h long
+    let duration = crate::video::get_video_duration_precise(clip_path).context(
+        "Failed to determine clip duration. Cannot safely export without known duration.",
+    )?;
+
+    let msg = format!("Detected clip duration: {:.3}s", duration);
+    if let Some(cb) = log_callback {
+        cb(ExportLogLevel::Info, msg.clone());
+    }
+    info!("{}", msg);
+
+    args.push("-t".to_string());
+    args.push(format!("{:.3}", duration));
 
     args.push("-y".to_string());
     args.push(output_path.to_string());
 
     let mut command = tokio::process::Command::new("ffmpeg");
+    let cmd_str = format!("FFmpeg command args: {:?}", args);
+    // Only log command debug if callback exists (to avoid spamming main log if not debug)
+    if let Some(cb) = log_callback {
+        cb(ExportLogLevel::Info, cmd_str.clone());
+    }
     command.args(&args);
 
     // Run with cancellation support

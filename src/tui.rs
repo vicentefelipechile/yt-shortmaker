@@ -108,6 +108,8 @@ pub enum AppScreen {
     ExportProcessing,
     /// Confirmation for cancelling export processing
     ExportProcessingCancellationConfirm,
+    /// Export process finished
+    ExportDone,
 }
 
 /// Log entry
@@ -1096,15 +1098,9 @@ impl App {
                             LogLevel::Warning,
                             rust_i18n::t!("export_select_template").to_string(),
                         );
-                    } else if self.export_output_dir.is_none() {
-                        self.log(
-                            LogLevel::Warning,
-                            rust_i18n::t!("export_select_output_first").to_string(),
-                        );
-                    } else {
+                    } else if let Some(output) = self.export_output_dir.clone() {
                         // All requirements met - start export
                         let num_folders = self.export_clip_folders.len();
-                        let output = self.export_output_dir.as_ref().unwrap().clone();
                         self.log(
                             LogLevel::Info,
                             rust_i18n::t!("export_starting", count = num_folders).to_string(),
@@ -1114,6 +1110,11 @@ impl App {
                             rust_i18n::t!("export_output_label", path = output).to_string(),
                         );
                         self.screen = AppScreen::ExportProcessing;
+                    } else {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_output_first").to_string(),
+                        );
                     }
                 }
                 KeyCode::Esc => {
@@ -1215,6 +1216,96 @@ impl App {
                 _ => {}
             },
             AppScreen::ExportPreview => match key {
+                KeyCode::Char('g') | KeyCode::Char('G') => {
+                    // Auto-reload plano if loaded from file (Same logic as 'V' had)
+                    if let Some(path) = &self.export_plano_path {
+                        match crate::exporter::load_plano(path) {
+                            Ok(plano) => {
+                                self.export_plano = plano;
+                                self.log(
+                                    LogLevel::Info,
+                                    rust_i18n::t!("export_plano_reloaded", path = path).to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                self.log(
+                                    LogLevel::Error,
+                                    rust_i18n::t!(
+                                        "export_plano_reload_error",
+                                        error = e.to_string()
+                                    )
+                                    .to_string(),
+                                );
+                            }
+                        }
+                    }
+
+                    // Generate preview
+                    if !self.export_plano.is_empty() {
+                        self.log(
+                            LogLevel::Info,
+                            rust_i18n::t!("export_generating_preview").to_string(),
+                        );
+
+                        // Use unique filename to force image viewer to open new instance
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let output_dir = std::env::temp_dir();
+                        let preview_filename = format!("yt_shortmaker_preview_{}.png", timestamp);
+                        let preview_path = output_dir.join(preview_filename);
+                        let preview_str = preview_path.to_string_lossy().to_string();
+
+                        let result = if let Some(video_path) = &self.export_preview_video_path {
+                            crate::exporter::generate_preview_from_video(
+                                video_path,
+                                &self.export_plano,
+                                &preview_str,
+                            )
+                        } else {
+                            crate::exporter::generate_preview_embedded(
+                                &self.export_plano,
+                                &preview_str,
+                            )
+                        };
+
+                        match result {
+                            Ok(_) => {
+                                self.export_preview_path = Some(preview_str.clone());
+                                self.log(
+                                    LogLevel::Success,
+                                    rust_i18n::t!("export_preview_generated", path = preview_str)
+                                        .to_string(),
+                                );
+
+                                // Open the preview
+                                self.log(
+                                    LogLevel::Info,
+                                    rust_i18n::t!("export_opening_preview").to_string(),
+                                );
+                                if let Err(e) = open::that(&preview_str) {
+                                    self.log(
+                                        LogLevel::Error,
+                                        format!("Failed to open preview: {}", e),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                self.log(
+                                    LogLevel::Error,
+                                    rust_i18n::t!("export_preview_error", error = e.to_string())
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        self.log(
+                            LogLevel::Warning,
+                            rust_i18n::t!("export_select_template_first").to_string(),
+                        );
+                    }
+                }
                 KeyCode::Enter | KeyCode::Esc => {
                     self.screen = AppScreen::ExportShorts;
                 }
@@ -1248,6 +1339,17 @@ impl App {
                 }
             }
         }
+
+        // Handle keys for ExportDone (same as Done)
+        if let AppScreen::ExportDone = self.screen {
+            match key {
+                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
+                    self.screen = AppScreen::MainMenu;
+                    self.export_plano_path = None;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Process messages from background tasks
@@ -1278,7 +1380,13 @@ impl App {
             }
 
             AppMessage::Finished => {
-                self.screen = AppScreen::Done;
+                if self.screen == AppScreen::ExportProcessing
+                    || self.screen == AppScreen::ExportProcessingCancellationConfirm
+                {
+                    self.screen = AppScreen::ExportDone;
+                } else {
+                    self.screen = AppScreen::Done;
+                }
             }
         }
     }
@@ -1405,7 +1513,53 @@ fn render_content(frame: &mut Frame, app: &App, area: Rect) {
             render_export_processing(frame, app, area); // Render background
             render_export_processing_cancel_confirm(frame, app, area); // Render popup overlay
         }
+        AppScreen::ExportDone => render_export_done(frame, app, area),
     }
+}
+
+fn render_export_done(frame: &mut Frame, app: &App, area: Rect) {
+    let (title, border_color) = if app.has_error {
+        (rust_i18n::t!("proc_failed").to_string(), Color::Red)
+    } else {
+        (rust_i18n::t!("proc_complete").to_string(), Color::Green)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+
+    let (msg, msg_color) = if app.has_error {
+        (rust_i18n::t!("done_msg_fail").to_string(), Color::Red)
+    } else {
+        (rust_i18n::t!("done_msg_success").to_string(), Color::Green)
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            msg,
+            Style::default().fg(msg_color).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    if let Some(ref msg) = app.result_message {
+        lines.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(if app.has_error {
+                Color::Red
+            } else {
+                Color::Yellow
+            }),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(rust_i18n::t!("done_return")));
+
+    let paragraph = Paragraph::new(Text::from(lines)).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_export_processing(frame: &mut Frame, app: &App, area: Rect) {
@@ -1597,7 +1751,7 @@ fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red))
-        .title(" 🔑 Google Gemini API Key Required ");
+        .title(format!(" {} ", rust_i18n::t!("setup_apikey_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1612,11 +1766,9 @@ fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     // Instructions
-    let instructions = Paragraph::new(
-        "Welcome! It looks like this is your first time running YT ShortMaker.\nPlease enter your Google Gemini API Key to continue.",
-    )
-    .style(Style::default().fg(Color::White))
-    .wrap(Wrap { trim: true });
+    let instructions = Paragraph::new(rust_i18n::t!("setup_apikey_welcome"))
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: true });
     frame.render_widget(instructions, input_layout[0]);
 
     // Input field
@@ -1633,10 +1785,8 @@ fn render_apikey_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input_text, input_layout[1]);
 
     // Note
-    let note = Paragraph::new(
-        "To get an API Key, visit https://aistudio.google.com/app/apikey\nPress Enter to save.",
-    )
-    .style(Style::default().fg(Color::Gray));
+    let note =
+        Paragraph::new(rust_i18n::t!("setup_apikey_instr")).style(Style::default().fg(Color::Gray));
     frame.render_widget(note, input_layout[2]);
 
     // Set cursor position
@@ -1707,7 +1857,7 @@ fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta))
-        .title(" Configuracion ");
+        .title(format!(" {} ", rust_i18n::t!("settings_title")));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1793,7 +1943,7 @@ fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
         let edit_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green))
-            .title(" Editing Value ");
+            .title(format!(" {} ", rust_i18n::t!("settings_editing")));
 
         let input = Paragraph::new(app.setting_input.as_str())
             .block(edit_block)
@@ -1811,9 +1961,9 @@ fn render_settings_editor(frame: &mut Frame, app: &App, area: Rect) {
 fn render_setup(frame: &mut Frame, _app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Initialization ");
+        .title(format!(" {} ", rust_i18n::t!("setup_title")));
 
-    let text = Paragraph::new("Loading configuration...")
+    let text = Paragraph::new(rust_i18n::t!("setup_loading"))
         .block(block)
         .style(Style::default().fg(Color::White));
 
@@ -1886,14 +2036,15 @@ fn render_format_confirm(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" 📹 Format Selection ");
+        .title(format!(" {} ", rust_i18n::t!("format_title")));
 
     let text = Text::from(vec![
         Line::from(""),
-        Line::from("Do you want to manually select the video format?"),
         Line::from(""),
-        Line::from("(Y)es - Show available formats and select one"),
-        Line::from("(N)o  - Use default format (recommended)"),
+        Line::from(rust_i18n::t!("format_msg")),
+        Line::from(""),
+        Line::from(rust_i18n::t!("format_yes")),
+        Line::from(rust_i18n::t!("format_no")),
         Line::from(""),
     ]);
 
@@ -1915,12 +2066,12 @@ fn render_processing(frame: &mut Frame, app: &App, area: Rect) {
     let (prog_title, prog_color) = match app.screen {
         AppScreen::Done => {
             if app.has_error {
-                (" ❌ Failed ", Color::Red)
+                (rust_i18n::t!("proc_failed").to_string(), Color::Red)
             } else {
-                (" ✅ Complete ", Color::Green)
+                (rust_i18n::t!("proc_complete").to_string(), Color::Green)
             }
         }
-        _ => (" Progress ", Color::Cyan),
+        _ => (rust_i18n::t!("proc_running").to_string(), Color::Cyan),
     };
 
     let progress_block = Block::default()
@@ -1940,7 +2091,7 @@ fn render_processing(frame: &mut Frame, app: &App, area: Rect) {
     // Logs
     let logs_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Activity Log ");
+        .title(format!(" {} ", rust_i18n::t!("log_title")));
 
     let log_height = layout[1].height.saturating_sub(2);
 
@@ -1971,9 +2122,10 @@ fn render_processing(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(logs_list, layout[1]);
 
     // Moments preview
-    let moments_block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" 🎬 Moments Found ({}) ", app.moments.len()));
+    let moments_block = Block::default().borders(Borders::ALL).title(format!(
+        " {} ",
+        rust_i18n::t!("moments_found_title", count = app.moments.len())
+    ));
 
     let moment_items: Vec<ListItem> = app
         .moments
@@ -2001,25 +2153,21 @@ fn render_shorts_confirm(frame: &mut Frame, count: usize, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
-        .title(" ✨ Analysis Complete ");
+        .title(format!(" {} ", rust_i18n::t!("analysis_complete")));
 
     let text = Text::from(vec![
         Line::from(""),
-        Line::from(vec![
-            Span::raw("Found "),
-            Span::styled(
-                count.to_string(),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" moments suitable for YouTube Shorts!"),
-        ]),
+        Line::from(vec![Span::styled(
+            rust_i18n::t!("analysis_found_msg", count = count),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
-        Line::from("Do you want to generate shorts from the source video?"),
+        Line::from(rust_i18n::t!("analysis_ask")),
         Line::from(""),
-        Line::from("(Y)es - Download high-res and extract clips"),
-        Line::from("(N)o  - Save moments only"),
+        Line::from(rust_i18n::t!("analysis_yes")),
+        Line::from(rust_i18n::t!("analysis_no")),
         Line::from(""),
     ]);
 
@@ -2029,9 +2177,9 @@ fn render_shorts_confirm(frame: &mut Frame, count: usize, area: Rect) {
 
 fn render_done(frame: &mut Frame, app: &App, area: Rect) {
     let (title, border_color) = if app.has_error {
-        (" ❌ Failed ", Color::Red)
+        (rust_i18n::t!("proc_failed").to_string(), Color::Red)
     } else {
-        (" ✅ Complete ", Color::Green)
+        (rust_i18n::t!("proc_complete").to_string(), Color::Green)
     };
 
     let block = Block::default()
@@ -2040,9 +2188,9 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
         .title(title);
 
     let (msg, msg_color) = if app.has_error {
-        ("Process failed with errors.", Color::Red)
+        (rust_i18n::t!("done_msg_fail").to_string(), Color::Red)
     } else {
-        ("Process completed successfully!", Color::Green)
+        (rust_i18n::t!("done_msg_success").to_string(), Color::Green)
     };
 
     let mut lines = vec![
@@ -2067,14 +2215,14 @@ fn render_done(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     lines.push(Line::from(vec![
-        Span::raw("Total moments found: "),
+        Span::raw(rust_i18n::t!("done_total_moments")),
         Span::styled(
             app.moments.len().to_string(),
             Style::default().fg(Color::Cyan),
         ),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from("Press Enter or Q to return to Menu..."));
+    lines.push(Line::from(rust_i18n::t!("done_return")));
 
     let paragraph = Paragraph::new(Text::from(lines)).block(block);
     frame.render_widget(paragraph, area);
@@ -2528,11 +2676,15 @@ fn render_export_select_folders(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Carpetas "));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", rust_i18n::t!("export_folders_title"))),
+    );
     frame.render_widget(list, chunks[0]);
 
     // Help
-    let help = Paragraph::new("[A] Agregar  [D] Eliminar  [Enter] Confirmar  [Esc] Atrás")
+    let help = Paragraph::new(rust_i18n::t!("export_folders_help"))
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
     frame.render_widget(help, chunks[1]);
@@ -2559,8 +2711,8 @@ fn render_export_select_plano(frame: &mut Frame, app: &App, area: Rect) {
 
     // Current plano
     let current = match &app.export_plano_path {
-        Some(path) => format!("📋 Actual: {}", path),
-        None => "❌ No hay plantilla seleccionada".to_string(),
+        Some(path) => rust_i18n::t!("export_plano_current", path = path).to_string(),
+        None => rust_i18n::t!("export_plano_none").to_string(),
     };
     let current_para = Paragraph::new(current)
         .style(Style::default().fg(Color::White))
@@ -2571,15 +2723,15 @@ fn render_export_select_plano(frame: &mut Frame, app: &App, area: Rect) {
     let options = Text::from(vec![
         Line::from(vec![
             Span::styled("[L] ", Style::default().fg(Color::Cyan)),
-            Span::raw("Cargar plantilla existente (.json)"),
+            Span::raw(rust_i18n::t!("export_plano_opt_load")),
         ]),
         Line::from(vec![
             Span::styled("[N] ", Style::default().fg(Color::Green)),
-            Span::raw("Crear nueva plantilla por defecto"),
+            Span::raw(rust_i18n::t!("export_plano_opt_new")),
         ]),
         Line::from(vec![
             Span::styled("[E] ", Style::default().fg(Color::Yellow)),
-            Span::raw("Editar plantilla actual (abre en editor)"),
+            Span::raw(rust_i18n::t!("export_plano_opt_edit")),
         ]),
     ]);
     let opts = Paragraph::new(options)
@@ -2588,7 +2740,7 @@ fn render_export_select_plano(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(opts, chunks[1]);
 
     // Help
-    let help = Paragraph::new("[Esc] Volver")
+    let help = Paragraph::new(rust_i18n::t!("export_plano_help"))
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
     frame.render_widget(help, chunks[2]);
@@ -2615,9 +2767,9 @@ fn render_export_preview(frame: &mut Frame, app: &App, area: Rect) {
 
     // Status
     let status = if app.export_plano.is_empty() {
-        "⚠️ No hay plantilla cargada".to_string()
+        rust_i18n::t!("export_preview_status_none").to_string()
     } else {
-        format!("✅ Plantilla con {} capas", app.export_plano.len())
+        rust_i18n::t!("export_preview_status_ok", count = app.export_plano.len()).to_string()
     };
     let status_para = Paragraph::new(status)
         .style(Style::default().fg(Color::White))
@@ -2641,21 +2793,32 @@ fn render_export_preview(frame: &mut Frame, app: &App, area: Rect) {
                 icon,
                 i,
                 match obj {
-                    crate::exporter::PlanoObject::Clip { .. } => "Clip Original",
-                    crate::exporter::PlanoObject::Image { .. } => "Imagen",
-                    crate::exporter::PlanoObject::Shader { .. } => "Shader",
-                    crate::exporter::PlanoObject::Video { .. } => "Video",
+                    crate::exporter::PlanoObject::Clip { .. } =>
+                        rust_i18n::t!("export_preview_layer_clip"),
+                    crate::exporter::PlanoObject::Image { .. } =>
+                        rust_i18n::t!("export_preview_layer_image"),
+                    crate::exporter::PlanoObject::Shader { .. } =>
+                        rust_i18n::t!("export_preview_layer_shader"),
+                    crate::exporter::PlanoObject::Video { .. } =>
+                        rust_i18n::t!("export_preview_layer_video"),
                 },
                 name
             ))
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Capas "));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+        " {} ",
+        rust_i18n::t!("export_preview_layers_title")
+    )));
     frame.render_widget(list, chunks[1]);
 
     // Actions
-    let actions = Paragraph::new("[G] Generar preview (imagen)  [Enter] Volver  [Esc] Cancelar")
+    let help_text = format!(
+        "{}  [Enter] Volver  [Esc] Volver",
+        rust_i18n::t!("export_preview_help_generate")
+    );
+    let actions = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Center);
     frame.render_widget(actions, chunks[2]);

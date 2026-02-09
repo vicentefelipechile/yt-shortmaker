@@ -122,6 +122,32 @@ pub fn get_video_duration(file_path: &str) -> Result<u64> {
     Ok(duration as u64)
 }
 
+/// Get precise video duration in seconds (f64)
+pub fn get_video_duration_precise(file_path: &str) -> Result<f64> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .context("Failed to run ffprobe")?;
+
+    let duration_str = String::from_utf8_lossy(&output.stdout);
+    let duration: f64 = duration_str
+        .trim()
+        .parse()
+        .context("Failed to parse duration")?;
+
+    Ok(duration)
+}
+
 /// Download low resolution video for analysis (silent mode)
 pub async fn download_low_res(
     url: &str,
