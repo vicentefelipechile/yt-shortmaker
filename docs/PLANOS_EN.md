@@ -2,6 +2,9 @@
 
 "Planos" are JSON files that define the visual composition of your Shorts. They allow you to position the original video, add overlays, effects, and animated backgrounds.
 
+> [!IMPORTANT]
+> **Performance:** Generating Shorts with composition (layers, filters, effects) requires re-encoding video, so this process **takes significantly longer** than simple clip extraction. Please be patient during export.
+
 ## Basic Structure
 
 A plano is an **array** of objects. Order matters: the first objects are drawn at the back, and the last ones at the front (layers).
@@ -104,7 +107,7 @@ Applies a visual effect to what is behind it. Currently supports blur.
   // 2. Main video centered
   {
     "type": "clip",
-    "position": { "x": "center", "y": "center", "width": "100%", "height": "auto" }
+    "position": { "x": "center", "y": "center", "width": "100%", "height": "40%" },
   },
 
   // 3. Watermark
@@ -116,3 +119,119 @@ Applies a visual effect to what is behind it. Currently supports blur.
   }
 ]
 ```
+
+## Common Use Cases and Examples
+
+Here are several practical examples. Copy and paste the JSON code into your `.json` plano file.
+
+### 1. Simple Blur Background (Default)
+The original video is used as a background (stretched and blurred) and also as the main element in the center.
+
+![Example Blur](./images/example_blur.png)
+
+```json
+[
+  {
+    "type": "clip",
+    "position": {
+      "width": "full",
+      "height": "full"
+    },
+    "fit": "stretch",
+    "comment": "Stretched background"
+  },
+  {
+    "type": "shader",
+    "effect": {
+      "type": "blur",
+      "intensity": 20
+    },
+    "position": {
+      "width": "full",
+      "height": "full"
+    }
+  },
+  {
+    "type": "clip",
+    "position": {
+      "x": "center",
+      "y": "center",
+      "width": "100%",
+      "height": "40%"
+    },
+    "comment": "Main video"
+  }
+]
+```
+
+### 2. Gameplay Background (External Video)
+A "gameplay" video (e.g., Minecraft, GTA) loops in the background, with the original video centered.
+
+![Example Gameplay](./images/example_gameplay.png)
+
+```json
+[
+  {
+    "type": "video",
+    "path": "./media/gameplay_background.mp4",
+    "position": { "width": "full", "height": "full" },
+    "loop_video": true,
+    "fit": "cover",
+    "opacity": 1.0,
+    "comment": "Looping background video"
+  },
+  {
+    "type": "clip",
+    "position": { "x": "center", "y": "center", "width": "100%", "height": "40%" },
+    "comment": "Main clip over gameplay"
+  }
+]
+```
+
+### 3. Split Screen
+Two videos stacked vertically. Useful for comparisons or reaction videos.
+(Here we use the same clip twice, but you could use `video` for the second one).
+
+![Example Split Screen](./images/example_split.png)
+
+```json
+[
+  // Top half
+  {
+    "type": "clip",
+    "position": { "x": 0, "y": 0, "width": "100%", "height": "50%" },
+    "fit": "cover",
+    "comment": "Top part"
+  },
+  // Bottom half (you can use another video here)
+  {
+    "type": "clip",
+    "position": { "x": 0, "y": "50%", "width": "100%", "height": "50%" },
+    "fit": "cover",
+    "comment": "Bottom part"
+  }
+]
+```
+
+### 4. Frame / Overlay
+Video with a transparent PNG image overlaid (frame, stats, branding).
+
+![Example Overlay](./images/example_overlay.png)
+
+```json
+[
+  {
+    "type": "clip",
+    "position": { "width": "full", "height": "full" },
+    "fit": "cover"
+  },
+  {
+    "type": "image",
+    "path": "./media/frame_overlay.png",
+    "position": { "x": 0, "y": 0, "width": "full", "height": "full" },
+    "opacity": 1.0,
+    "comment": "PNG image with transparency"
+  }
+]
+```
+
