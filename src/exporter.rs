@@ -772,6 +772,11 @@ pub async fn export_clip(
     cancellation_token: Arc<AtomicBool>,
     log_callback: Option<&ExportLogCallback>,
 ) -> Result<()> {
+    // Check cancellation immediately at start
+    if cancellation_token.load(Ordering::Relaxed) {
+        return Err(anyhow!("process cancelled by user"));
+    }
+
     if !Path::new(clip_path).exists() {
         let msg = format!("Clip not found: {}", clip_path);
         if let Some(cb) = log_callback {
@@ -824,6 +829,12 @@ pub async fn export_clip(
     // 4. Limit output duration to the length of the main clip
     // This prevents infinite loops if background video is looping
     // CRITICAL: We MUST have a duration, otherwise the 10h black canvas will make the video 10h long
+
+    // Check cancellation before blocking ffprobe call
+    if cancellation_token.load(Ordering::Relaxed) {
+        return Err(anyhow!("process cancelled by user"));
+    }
+
     let duration = crate::video::get_video_duration_precise(clip_path).context(
         "Failed to determine clip duration. Cannot safely export without known duration.",
     )?;

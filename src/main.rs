@@ -472,6 +472,17 @@ async fn run_app(
 
         // Handle Drive Auth Request
 
+        // Reset processing flags if we just entered the persistent screen
+        if previous_screen != AppScreen::ExportProcessing
+            && app.screen == AppScreen::ExportProcessing
+        {
+            export_processing_started = false;
+        }
+
+        if previous_screen != AppScreen::Processing && app.screen == AppScreen::Processing {
+            processing_started = false;
+        }
+
         // Handle screen transitions
         match &app.screen {
             AppScreen::ResumePrompt(_) => {

@@ -80,7 +80,7 @@ pub async fn run_command_with_cancellation(
             if cancellation_token.load(Ordering::Relaxed) {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
 
@@ -90,6 +90,7 @@ pub async fn run_command_with_cancellation(
         }
         _ = cancellation_future => {
             // Process will be killed because output_future is dropped and we set kill_on_drop(true)
+            log::warn!("Command cancelled by user token. Dropping child process.");
             Err(anyhow!("Process cancelled by user"))
         }
     }
