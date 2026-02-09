@@ -41,8 +41,14 @@ Representa el video original que estás procesando. Puedes usarlo varias veces.
 
 *   `type`: "clip"
 *   `position`: (Opcional) Posición del video. Default: full.
-*   `crop`: (Opcional) Recorte del video original antes de colocarlo.
-    *   `x_from`, `x_to`, `y_from`, `y_to`: Coordenadas de recorte.
+*   `crop`: (Opcional) Recorte del video fuente original.
+    *   Define una ventana de recorte en píxeles sobre el video original.
+    *   `x_from`: Píxel inicial izquierda (ej: 0).
+    *   `x_to`: Píxel final derecha (ej: 1920). Si es mayor que `x_from`, recorta el ancho.
+    *   `y_from`: Píxel inicial arriba (ej: 0).
+    *   `y_to`: Píxel final abajo (ej: 1080). Si es mayor que `y_from`, recorta la altura.
+    *   El recorte se aplica **antes** de escalar o posicionar el clip.
+*   `fit`: (Opcional) Modo de ajuste. Valores: `"stretch"` (default, estira), `"cover"` (recorta), `"contain"` (bandas negras).
 *   `comment`: (Opcional) Nota para el usuario.
 
 ### 2. Imagen (`image`)
@@ -60,6 +66,9 @@ Video de fondo o superpuesto (ej: gameplay de fondo, efectos de partículas).
 *   `path`: Ruta al archivo de video.
 *   `position`: Posición y tamaño.
 *   `loop_video`: `true` o `false`. Si el video es más corto que el clip, se repite en bucle.
+*   `loop_video`: `true` o `false`. Si el video es más corto que el clip, se repite en bucle.
+*   `opacity`: (Opcional) Opacidad de 0.0 a 1.0 (Default: 1.0).
+*   `fit`: (Opcional) Modo de ajuste. Valores: `"stretch"` (default), `"cover"`, `"contain"`.
 
 ### 4. Shader (`shader`)
 Aplica un efecto visual a lo que hay detrás (o genera un fondo). Actualmente soporta desenfoque (blur).

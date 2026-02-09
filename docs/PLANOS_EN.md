@@ -41,9 +41,15 @@ Represents the source video being processed. You can use it multiple times.
 
 *   `type`: "clip"
 *   `position`: (Optional) Video position. Default: full.
-*   `crop`: (Optional) Crop of the source video before placement.
-    *   `x_from`, `x_to`, `y_from`, `y_to`: Crop coordinates.
-*   `comment`: (Optional) Note for the user.
+*   `crop`: (Optional) Crop of the source video.
+    *   Defines a crop window in pixels on the original video.
+    *   `x_from`: Start pixel left (e.g., 0).
+    *   `x_to`: End pixel right (e.g., 1920). If greater than `x_from`, crops width.
+    *   `y_from`: Start pixel top (e.g., 0).
+    *   `y_to`: End pixel bottom (e.g., 1080). If greater than `y_from`, crops height.
+    *   Cropping applies **before** scaling or positioning.
+*   `fit`: (Optional) Fit mode. Values: `"stretch"` (default, stretches), `"cover"` (crops), `"contain"` (letterbox).
+*   `comment`: (Optional) User note.
 
 ### 2. Image (`image`)
 Overlays a static image (png, jpg). Ideal for frames, logos, or watermarks.
@@ -59,7 +65,10 @@ Background or overlay video (e.g., background gameplay, particle effects).
 *   `type`: "video"
 *   `path`: Path to the video file.
 *   `position`: Position and size.
-*   `loop_video`: `true` or `false`. Loops if shorter than clip.
+*   `loop_video`: `true` or `false`. If the video is shorter than the main clip, it loops.
+*   `loop_video`: `true` or `false`. If the video is shorter than the main clip, it loops.
+*   `opacity`: (Optional) Opacity from 0.0 to 1.0 (Default: 1.0).
+*   `fit`: (Optional) Fit mode. Values: `"stretch"` (default), `"cover"`, `"contain"`.
 
 ### 4. Shader (`shader`)
 Applies a visual effect to what is behind it. Currently supports blur.
