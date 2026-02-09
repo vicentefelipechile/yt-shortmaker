@@ -48,6 +48,13 @@ Represents the source video being processed. You can use it multiple times.
     *   `y_from`: Start pixel top (e.g., 0).
     *   `y_to`: End pixel bottom (e.g., 1080). If greater than `y_from`, crops height.
     *   Cropping applies **before** scaling or positioning.
+    *   **Example:** To crop a 1920x1080 video to a center 1080x1080 square:
+        ```json
+        "crop": {
+          "x_from": 420,  // (1920 - 1080) / 2 = 420
+          "x_to": 1500    // 420 + 1080 = 1500
+        }
+        ```
 *   `fit`: (Optional) Fit mode. Values: `"stretch"` (default, stretches), `"cover"` (crops), `"contain"` (letterbox).
 *   `comment`: (Optional) User note.
 

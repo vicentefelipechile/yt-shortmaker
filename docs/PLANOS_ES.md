@@ -48,6 +48,13 @@ Representa el video original que estás procesando. Puedes usarlo varias veces.
     *   `y_from`: Píxel inicial arriba (ej: 0).
     *   `y_to`: Píxel final abajo (ej: 1080). Si es mayor que `y_from`, recorta la altura.
     *   El recorte se aplica **antes** de escalar o posicionar el clip.
+    *   **Ejemplo:** Para recortar un video 1920x1080 y dejar solo un cuadrado central de 1080x1080:
+        ```json
+        "crop": {
+          "x_from": 420,  // (1920 - 1080) / 2 = 420
+          "x_to": 1500    // 420 + 1080 = 1500
+        }
+        ```
 *   `fit`: (Opcional) Modo de ajuste. Valores: `"stretch"` (default, estira), `"cover"` (recorta), `"contain"` (bandas negras).
 *   `comment`: (Opcional) Nota para el usuario.
 
