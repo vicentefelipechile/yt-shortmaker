@@ -73,7 +73,6 @@ Video de fondo o superpuesto (ej: gameplay de fondo, efectos de partículas).
 *   `path`: Ruta al archivo de video.
 *   `position`: Posición y tamaño.
 *   `loop_video`: `true` o `false`. Si el video es más corto que el clip, se repite en bucle.
-*   `loop_video`: `true` o `false`. Si el video es más corto que el clip, se repite en bucle.
 *   `opacity`: (Opcional) Opacidad de 0.0 a 1.0 (Default: 1.0).
 *   `fit`: (Opcional) Modo de ajuste. Valores: `"stretch"` (default), `"cover"`, `"contain"`.
 

@@ -73,7 +73,6 @@ Background or overlay video (e.g., background gameplay, particle effects).
 *   `path`: Path to the video file.
 *   `position`: Position and size.
 *   `loop_video`: `true` or `false`. If the video is shorter than the main clip, it loops.
-*   `loop_video`: `true` or `false`. If the video is shorter than the main clip, it loops.
 *   `opacity`: (Optional) Opacity from 0.0 to 1.0 (Default: 1.0).
 *   `fit`: (Optional) Fit mode. Values: `"stretch"` (default), `"cover"`, `"contain"`.
 
