@@ -2,9 +2,6 @@
 
 Los "Planos" (Plantillas) son archivos JSON que definen la estructura visual de tus Shorts. Te permiten posicionar el video original, añadir superposiciones, efectos y fondos animados.
 
-> [!IMPORTANT]
-> **Rendimiento:** La generación de Shorts con composición (capas, filtros, efectos) requiere recodificar el video, por lo que este proceso **tarda mucho más tiempo** que la simple extracción de clips. Por favor, ten paciencia durante la exportación.
-
 ## Estructura Básica
 
 Un plano es una **lista (array)** de objetos. El orden es importante: los primeros objetos se dibujan al fondo y los últimos al frente (capas).

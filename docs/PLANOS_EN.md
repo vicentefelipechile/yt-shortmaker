@@ -2,9 +2,6 @@
 
 "Planos" are JSON files that define the visual composition of your Shorts. They allow you to position the original video, add overlays, effects, and animated backgrounds.
 
-> [!IMPORTANT]
-> **Performance:** Generating Shorts with composition (layers, filters, effects) requires re-encoding video, so this process **takes significantly longer** than simple clip extraction. Please be patient during export.
-
 ## Basic Structure
 
 A plano is an **array** of objects. Order matters: the first objects are drawn at the back, and the last ones at the front (layers).
