@@ -18,6 +18,7 @@ jobs:
             asset_name: yt-shortmaker-windows-amd64.exe
             use_cross: false
             use_wix: true
+            is_primary: true
           
           # Windows x86 (32-bit)
           - os: windows-latest
@@ -42,6 +43,7 @@ jobs:
             asset_name: yt-shortmaker-linux-amd64
             use_cross: false 
             use_wix: false
+            is_primary: true
 
           # Linux ARM64
           - os: ubuntu-latest
@@ -110,7 +112,13 @@ jobs:
           if [ -d "$DATA_DIR" ]; then
              cd "$DATA_DIR"
              if [ -f "${{ matrix.artifact_name }}" ]; then
-                mv "${{ matrix.artifact_name }}" "../../../${{ matrix.asset_name }}"
+                # Copy to asset name (specific architecture name)
+                cp "${{ matrix.artifact_name }}" "../../../${{ matrix.asset_name }}"
+                
+                # If primary target, also copy to generic name
+                if [ "${{ matrix.is_primary }}" == "true" ]; then
+                   cp "${{ matrix.artifact_name }}" "../../../${{ matrix.artifact_name }}"
+                fi
              fi
              cd -
           else
@@ -124,7 +132,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             ${{ matrix.asset_name }}
-            target/${{ matrix.target }}/release/*.msi
+            ${{ matrix.artifact_name }}
+            target/**/*.msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

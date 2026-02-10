@@ -6,11 +6,13 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+      - .github/workflows/*.yml
   pull_request:
     branches: [ "main", "master", "openrouter" ]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+      - .github/workflows/*.yml
 
 env:
   CARGO_TERM_COLOR: always
