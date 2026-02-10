@@ -2,46 +2,22 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - 'Cargo.toml'
+    tags:
+      - 'v*'
 
 jobs:
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-      version: ${{ steps.check.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Check version
-        id: check
-        shell: bash
-        run: |
-          VERSION=$(grep "^version" Cargo.toml | head -n 1 | cut -d '"' -f 2)
-          echo "Detected version: $VERSION"
-          if [[ "$VERSION" == *".0" ]]; then
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "should_release=false" >> $GITHUB_OUTPUT
-          fi
-
   create-release:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Windows x64
+          # Windows x64 (with MSI)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: yt-shortmaker.exe
             asset_name: yt-shortmaker-windows-amd64.exe
             use_cross: false
+            use_wix: true
           
           # Windows x86 (32-bit)
           - os: windows-latest
@@ -49,6 +25,7 @@ jobs:
             artifact_name: yt-shortmaker.exe
             asset_name: yt-shortmaker-windows-i386.exe
             use_cross: false
+            use_wix: false
 
           # Windows ARM64
           - os: windows-latest
@@ -56,14 +33,15 @@ jobs:
             artifact_name: yt-shortmaker.exe
             asset_name: yt-shortmaker-windows-arm64.exe
             use_cross: false
+            use_wix: false
 
           # Linux x64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: yt-shortmaker
             asset_name: yt-shortmaker-linux-amd64
-            use_cross: false # Standard runner is x64 linux, usually fine without cross, but we stick to consistent env. Check dependencies.
-            # Using standard cargo build for x64 linux to rely on apt-get storage in next steps.
+            use_cross: false 
+            use_wix: false
 
           # Linux ARM64
           - os: ubuntu-latest
@@ -71,6 +49,7 @@ jobs:
             artifact_name: yt-shortmaker
             asset_name: yt-shortmaker-linux-arm64
             use_cross: true
+            use_wix: false
 
     runs-on: ${{ matrix.os }}
     permissions:
@@ -87,9 +66,11 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross
 
-      # Linux dependencies (Only for non-cross linux builds or if we need them for cross to link against?)
-      # Cross uses docker images which might have basic libs, but for audio/x11 we might need custom images or static linking.
-      # For now, let's keep the basic apt-get for the non-cross linux build.
+      - name: Install cargo-wix
+        if: matrix.use_wix
+        run: cargo install cargo-wix
+
+      # Linux dependencies
       - name: Install Linux Dependencies (Host)
         if: runner.os == 'Linux' && !matrix.use_cross
         run: |
@@ -105,34 +86,50 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
-      - name: Create Tag
-        # Only run this once, or let it race safely.
-        # Ideally only one job does this or we check existence.
-        # Simpler: Just try to tag, ignore failure.
+      - name: Build MSI (Windows)
+        if: matrix.use_wix
+        # cargo wix build needs the target dir
+        # By default cargo wix tries to build again. --no-build uses existing artifacts if in correct place.
+        # However, standard cargo build puts in target/release or target/x86_64-pc-windows-msvc/release.
+        # cargo wix expects them in target/x86_64-pc-windows-msvc/release/
+        # Let's ensure we just run cargo wix normally as the build step for wix target? No, we want the exe too.
+        # Simplest: Build normally as above. Then run cargo wix --no-build only if we can trust it finds the binary.
+        # Safest: Let cargo wix do the build for us? But we want consistent build flags.
+        # Check: cargo wix --no-build --target ... 
+        run: cargo wix --no-build --target ${{ matrix.target }} --nocapture
+
+      - name: Rename and Upload Binary
+        shell: bash
         run: |
-          git tag "v${{ needs.check-version.outputs.version }}"
-          git push origin "v${{ needs.check-version.outputs.version }}"
-        continue-on-error: true
-      
-      - name: Upload Release Asset
+          # Rename source artifact to desired asset name
+          # Need to find source. For cross/target-specific builds: target/${{ matrix.target }}/release/
+          # For plain cargo build on host: target/release/ OR target/${{ matrix.target }}/release/ depending on config.
+          # dtolnay action usually sets up cargo to match, but explicit --target in build command forces target dir.
+          DATA_DIR="target/${{ matrix.target }}/release"
+          
+          if [ -d "$DATA_DIR" ]; then
+             cd "$DATA_DIR"
+             if [ -f "${{ matrix.artifact_name }}" ]; then
+                mv "${{ matrix.artifact_name }}" "../../../${{ matrix.asset_name }}"
+             fi
+             cd -
+          else
+             echo "Directory $DATA_DIR not found"
+             exit 1
+          fi
+
+      - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ needs.check-version.outputs.version }}
-          name: Release v${{ needs.check-version.outputs.version }}
-          files: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-          # We map the file to the specific asset name using the 'files' syntax or by renaming
-          # The action supports 'files' as a glob or list. It doesn't rename automatically easily.
-          # Let's rename the file first to match asset_name
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ matrix.asset_name }}
+            target/${{ matrix.target }}/release/*.msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Rename and Upload
-        # Manual upload/rename handling since softprops files input takes literal paths
-        run: |
-          cd target/${{ matrix.target }}/release
-          mv ${{ matrix.artifact_name }} ${{ matrix.asset_name }}
-      
+
       - name: Generate Release Notes
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
           cat <<EOF > RELEASE_NOTES.md
@@ -141,15 +138,16 @@ jobs:
           | Filename | System | Description |
           | :--- | :--- | :--- |
           | \`yt-shortmaker-windows-amd64.exe\` | **Windows 10/11** (64-bit) | Standard version for most modern PCs. |
+          | \`yt-shortmaker-windows-amd64.msi\` | **Windows Installer** | Installer for standard Windows (adds to PATH). |
           | \`yt-shortmaker-windows-i386.exe\` | **Windows 7/8/10** (32-bit) | For older or low-end computers. |
           | \`yt-shortmaker-windows-arm64.exe\` | **Windows ARM64** | For devices like Surface Pro X, Lenovo ThinkPad X13s (Snapdragon). |
           | \`yt-shortmaker-linux-amd64\` | **Linux** (64-bit) | Standard for servers and desktops (Ubuntu, Debian, Fedora, etc). |
           | \`yt-shortmaker-linux-arm64\` | **Linux ARM64** | For Raspberry Pi 4/5, AWS Graviton, or other ARM servers. |
           EOF
 
-      - name: Publish Release
+      - name: Publish Release Notes
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ needs.check-version.outputs.version }}
-          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+          tag_name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md

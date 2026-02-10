@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Image overlay configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -159,12 +159,24 @@ fn default_language() -> String {
 }
 
 fn default_cookies_path() -> String {
-    "./cookies.json".to_string()
+    AppConfig::get_config_dir()
+        .join("cookies.json")
+        .to_string_lossy()
+        .to_string()
 }
 
 impl AppConfig {
-    /// Configuration file name
-    pub const CONFIG_PATH: &'static str = "settings.json";
+    /// Get the configuration directory (e.g., %LocalAppData%/yt-shortmaker)
+    pub fn get_config_dir() -> PathBuf {
+        dirs::data_local_dir()
+            .map(|d| d.join("yt-shortmaker"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Get the full path to the configuration file
+    pub fn get_config_path() -> PathBuf {
+        Self::get_config_dir().join("settings.json")
+    }
 
     /// Load configuration from file (first attempt)
     pub fn load() -> Result<Self> {
@@ -173,13 +185,15 @@ impl AppConfig {
 
     /// Load configuration with optional password
     pub fn load_with_password(password: Option<&str>) -> Result<Self> {
-        if !Path::new(Self::CONFIG_PATH).exists() {
+        let config_path = Self::get_config_path();
+        if !config_path.exists() {
             return Err(anyhow::anyhow!(
-                "Configuration file not found. Please create settings.json"
+                "Configuration file not found at {:?}. Please create settings.json",
+                config_path
             ));
         }
 
-        let content = fs::read_to_string(Self::CONFIG_PATH)?;
+        let content = fs::read_to_string(&config_path)?;
 
         // Try to parse as SecuredConfig first
         if let Ok(secured) = serde_json::from_str::<SecuredConfig>(&content) {
@@ -216,6 +230,12 @@ impl AppConfig {
 
     /// Create a default configuration file
     pub fn create_default() -> Result<()> {
+        let default_output = dirs::video_dir()
+            .map(|d| d.join("YT_Shorts"))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
+
         let default_config = AppConfig {
             google_api_keys: vec![ApiKey {
                 value: "YOUR_API_KEY_HERE".to_string(),
@@ -223,10 +243,10 @@ impl AppConfig {
                 enabled: true,
             }],
             language: "en".to_string(),
-            default_output_dir: "./output".to_string(),
+            default_output_dir: default_output,
             extract_shorts_when_finished_moments: false,
             use_cookies: false,
-            cookies_path: "./cookies.json".to_string(),
+            cookies_path: default_cookies_path(),
             shorts_config: ShortsConfig::default(),
             use_fast_model: true,
 
@@ -242,6 +262,11 @@ impl AppConfig {
 
     /// Save configuration to file using active encryption mode
     pub fn save(&self) -> Result<()> {
+        let config_dir = Self::get_config_dir();
+        if !config_dir.exists() {
+            fs::create_dir_all(&config_dir)?;
+        }
+
         let json_content = serde_json::to_string_pretty(self)?;
         let secured = SecuredConfig::new(
             json_content,
@@ -249,7 +274,7 @@ impl AppConfig {
             self.active_password.as_deref(),
         )?;
         let file_content = serde_json::to_string_pretty(&secured)?;
-        fs::write(Self::CONFIG_PATH, file_content)?;
+        fs::write(Self::get_config_path(), file_content)?;
         Ok(())
     }
 

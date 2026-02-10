@@ -267,25 +267,24 @@ fn print_help(program: &str) {
     );
     println!();
     println!("CONFIGURATION:");
-    println!("  Edit settings.json to configure:");
+    println!("  Edit {:?} to configure:", AppConfig::get_config_path());
     println!("  - shorts_config.background_video   Background video path (looped)");
     println!("  - shorts_config.background_opacity Opacity (0.0-1.0, default 0.4)");
     println!("  - shorts_config.overlays           Array of image overlays with x,y positions");
 }
 
-/// Load config for CLI commands (doesn't require API keys)
+/// Load config for CLI commands
 fn load_config_for_cli() -> Result<AppConfig> {
-    if !Path::new("settings.json").exists() {
+    if !AppConfig::get_config_path().exists() {
         // Create default config
         AppConfig::create_default()?;
-        println!("📝 Created default settings.json");
+        println!(
+            "📝 Created default config at {:?}",
+            AppConfig::get_config_path()
+        );
     }
 
-    let content = fs::read_to_string("settings.json")?;
-    let config: AppConfig =
-        serde_json::from_str(&content).context("Failed to parse settings.json")?;
-
-    Ok(config)
+    AppConfig::load().context("Failed to load configuration")
 }
 
 /// Run the TUI mode
@@ -802,7 +801,10 @@ fn load_config_with_fallback() -> Result<AppConfig> {
             }
 
             if err_msg.contains("Configuration file not found") {
-                println!("📝 Configuration file not found. Creating default settings.json...");
+                println!(
+                    "📝 Configuration file not found. Creating default config at {:?}...",
+                    AppConfig::get_config_path()
+                );
                 AppConfig::create_default()?;
                 return AppConfig::load();
             }
