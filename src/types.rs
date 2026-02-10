@@ -37,7 +37,7 @@ pub struct SessionState {
 }
 
 /// Application version constant
-pub const APP_VERSION: &str = "1.11.0";
+pub const APP_VERSION: &str = "1.11.1";
 
 /// Application name constant
 pub const APP_NAME: &str = "YT ShortMaker";
