@@ -147,6 +147,26 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub use_fast_model: bool,
 
+    /// Enable automatic subtitles via whisper-rs
+    #[serde(default)]
+    pub enable_subtitles: bool,
+
+    /// Path to the Whisper model file (ggml-base.bin)
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model_path: String,
+
+    /// Enable face tracking for intelligent auto-crop
+    #[serde(default)]
+    pub enable_face_tracking: bool,
+
+    /// Use optimized pipeline (high-res first, compressed chunks)
+    #[serde(default)]
+    pub use_optimized_pipeline: bool,
+
+    /// Target resolution for compressed chunks (default: 720)
+    #[serde(default = "default_compression_resolution")]
+    pub compression_target_resolution: u32,
+
     // Internal State for Security (Not saved to JSON body)
     #[serde(skip)]
     pub active_encryption_mode: EncryptionMode,
@@ -160,6 +180,14 @@ fn default_language() -> String {
 
 fn default_cookies_path() -> String {
     "./cookies.json".to_string()
+}
+
+fn default_whisper_model() -> String {
+    "auto".to_string()
+}
+
+fn default_compression_resolution() -> u32 {
+    720
 }
 
 impl AppConfig {
@@ -229,6 +257,11 @@ impl AppConfig {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             use_fast_model: true,
+            enable_subtitles: false,
+            whisper_model_path: "auto".to_string(),
+            enable_face_tracking: false,
+            use_optimized_pipeline: false,
+            compression_target_resolution: 720,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,
@@ -318,6 +351,11 @@ mod tests {
             cookies_path: "./cookies.json".to_string(),
             shorts_config: ShortsConfig::default(),
             use_fast_model: true,
+            enable_subtitles: false,
+            whisper_model_path: "auto".to_string(),
+            enable_face_tracking: false,
+            use_optimized_pipeline: false,
+            compression_target_resolution: 720,
 
             active_encryption_mode: EncryptionMode::None,
             active_password: None,

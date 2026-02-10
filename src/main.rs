@@ -2,8 +2,10 @@
 //! A robust TUI tool to automate YouTube Shorts creation from long-form content
 //! using Google Gemini AI for intelligent content analysis.
 
+mod compression;
 mod config;
 mod exporter;
+mod facetracking;
 mod gemini;
 mod security;
 mod setup;
@@ -11,6 +13,8 @@ mod shorts;
 mod tui;
 mod types;
 mod video;
+#[cfg(feature = "whisper")]
+mod whisper;
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -798,6 +802,11 @@ fn load_config_with_fallback() -> Result<AppConfig> {
                     active_encryption_mode: security::EncryptionMode::Password,
                     active_password: None,
                     language: "en".to_string(),
+                    enable_subtitles: false,
+                    whisper_model_path: "auto".to_string(),
+                    enable_face_tracking: false,
+                    use_optimized_pipeline: false,
+                    compression_target_resolution: 720,
                 });
             }
 
@@ -838,231 +847,238 @@ async fn run_processing(
     // Save initial state
     save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
 
-    let temp_low_res = format!("{}/low_res.mp4", temp_dir);
+    // Pipeline mode selection
+    if config.use_optimized_pipeline {
+        // === OPTIMIZED PIPELINE ===
+        // Download high-res first, then split with compression
+        let source_high_res = format!("{}/high_res.mp4", temp_dir);
 
-    // Download low-res if needed
-    if !Path::new(&temp_low_res).exists() {
-        let _ = tx.send(AppMessage::Status(
-            "Downloading Low-Res video...".to_string(),
-        ));
-        let _ = tx.send(AppMessage::Progress(0.1, "Downloading...".to_string()));
-
-        video::download_low_res(
-            &url,
-            &temp_low_res,
-            config.use_cookies,
-            &config.cookies_path,
-            cancellation_token.clone(),
-        )
-        .await
-        .context("Failed to download low-res video")?;
-
-        let _ = tx.send(AppMessage::Log(
-            LogLevel::Success,
-            "Low-res video downloaded".to_string(),
-        ));
-    } else {
-        let _ = tx.send(AppMessage::Log(
-            LogLevel::Info,
-            "Using cached low-res video".to_string(),
-        ));
-    }
-
-    // Get video duration
-    let duration = video::get_video_duration(&temp_low_res)?;
-    let _ = tx.send(AppMessage::Log(
-        LogLevel::Info,
-        format!("Video duration: {} seconds", duration),
-    ));
-
-    // Split into chunks
-    let temp_chunks_dir = format!("{}/chunks", temp_dir);
-    let _ = tx.send(AppMessage::Status(
-        "Splitting video into chunks...".to_string(),
-    ));
-    let _ = tx.send(AppMessage::Progress(0.2, "Splitting...".to_string()));
-
-    let video_chunks = if Path::new(&temp_chunks_dir).exists()
-        && fs::read_dir(&temp_chunks_dir)?.next().is_some()
-    {
-        let _ = tx.send(AppMessage::Log(
-            LogLevel::Info,
-            "Using existing video chunks".to_string(),
-        ));
-        let chunks = video::calculate_chunks(duration);
-        let mut v_chunks = Vec::new();
-        for (i, (start, _)) in chunks.iter().enumerate() {
-            let chunk_path = format!("{}/chunk_{}.mp4", temp_chunks_dir, i);
-            if Path::new(&chunk_path).exists() {
-                v_chunks.push(types::VideoChunk {
-                    start_seconds: *start,
-                    file_path: chunk_path,
-                });
-            }
-        }
-        if v_chunks.is_empty() {
-            video::split_video(
-                &temp_low_res,
-                &temp_chunks_dir,
-                &video::calculate_chunks(duration),
-                cancellation_token.clone(),
-            )
-            .await?
-        } else {
-            v_chunks
-        }
-    } else {
-        let chunks = video::calculate_chunks(duration);
-        video::split_video(
-            &temp_low_res,
-            &temp_chunks_dir,
-            &chunks,
-            cancellation_token.clone(),
-        )
-        .await?
-    };
-
-    let _ = tx.send(AppMessage::Log(
-        LogLevel::Success,
-        format!("Created {} chunks", video_chunks.len()),
-    ));
-
-    // Analyze chunks with Gemini
-    let _ = tx.send(AppMessage::Status(
-        "Analyzing with Gemini AI...".to_string(),
-    ));
-    // Initialize Gemini Client
-    let enabled_keys: Vec<(String, String)> = config
-        .google_api_keys
-        .iter()
-        .filter(|k| k.enabled)
-        .map(|k| (k.name.clone(), k.value.clone()))
-        .collect();
-
-    if enabled_keys.is_empty() {
-        let _ = tx.send(AppMessage::Error(
-            "No enabled API keys found. Please check settings.".to_string(),
-        ));
-        return Ok((Vec::new(), None));
-    }
-
-    let gemini = GeminiClient::new(enabled_keys, config.use_fast_model);
-
-    // Iterate over chunks and analyze
-    let mut chunks_analyzed = 0;
-
-    for (i, chunk) in video_chunks.iter().enumerate() {
-        // Check cancellation
-        if cancellation_token.load(Ordering::Relaxed) {
-            let _ = tx.send(AppMessage::Status("Cancelled".to_string()));
-            let _ = tx.send(AppMessage::Log(
-                LogLevel::Warning,
-                "Processing cancelled by user".to_string(),
+        if !Path::new(&source_high_res).exists() {
+            let _ = tx.send(AppMessage::Status(
+                "[Optimized] Downloading High-Res video...".to_string(),
             ));
-            // Return early - preserve temp dir
-            return Ok((Vec::new(), None));
-        }
+            let _ = tx.send(AppMessage::Progress(
+                0.1,
+                "High-res download...".to_string(),
+            ));
 
-        let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
-        let _ = tx.send(AppMessage::Progress(
-            progress,
-            format!("Analyzing chunk {}/{}", i + 1, video_chunks.len()),
-        ));
-        let _ = tx.send(AppMessage::Status(format!(
-            "Analyzing chunk {}/{}...",
-            i + 1,
-            video_chunks.len()
-        )));
-
-        // Upload first
-        // Process chunk with sticky session (Upload + Analyze)
-        let tx_clone = tx.clone();
-        let status_cb = move |msg: String| {
-            let _ = tx_clone.send(AppMessage::Status(msg));
-        };
-
-        match gemini
-            .process_chunk(
-                &chunk.file_path,
-                chunk.start_seconds,
-                status_cb,
+            video::download_high_res(
+                &url,
+                &source_high_res,
+                config.use_cookies,
+                &config.cookies_path,
+                context.custom_format.clone(),
                 cancellation_token.clone(),
             )
             .await
-        {
-            Ok(moments) => {
-                chunks_analyzed += 1;
-                let _ = tx.send(AppMessage::Log(
-                    LogLevel::Info,
-                    format!("Chunk {}: Found {} moments", i + 1, moments.len()),
-                ));
-                for m in &moments {
-                    let _ = tx.send(AppMessage::MomentFound(m.clone()));
-                }
-                all_moments.extend(moments);
-                save_session(&temp_json_path, &url, &all_moments, &temp_dir)?;
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                if err_msg.contains("cancelled") {
-                    return Ok((Vec::new(), None));
-                }
-                if err_msg.contains("No API keys available") {
-                    let _ = tx.send(AppMessage::Error(
-                        "API Keys Exhausted during analysis.".to_string(),
-                    ));
-                    break;
-                } else {
-                    let _ = tx.send(AppMessage::Log(
-                        LogLevel::Warning,
-                        format!("Chunk {} analysis failed: {}", i + 1, e),
-                    ));
-                }
-            }
+            .context("Failed to download high-res video")?;
+
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Success,
+                "High-res video downloaded".to_string(),
+            ));
+        } else {
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Info,
+                "Using cached high-res video".to_string(),
+            ));
         }
-    }
 
-    // Check if we found anything or if we should fallback
-    if all_moments.is_empty() && chunks_analyzed < video_chunks.len() {
-        // This implies we failed early or found nothing.
-        // If we broke due to keys, we should fallback.
-        // Since we don't track *why* we broke explicitly outside the loop easily,
-        // let's assume if moments is empty we try fallback.
-
-        let _ = tx.send(AppMessage::Status(
-            "Falling back to HQ Download...".to_string(),
-        ));
+        // Get duration from high-res
+        let duration = video::get_video_duration(&source_high_res)?;
         let _ = tx.send(AppMessage::Log(
-            LogLevel::Warning,
-            "Analysis incomplete or failed. Downloading full video.".to_string(),
+            LogLevel::Info,
+            format!("Video duration: {} seconds", duration),
         ));
 
-        let video_id = extract_video_id(&url).unwrap_or("video".to_string());
-        let output_file = format!("{}/{}_full.mp4", config.default_output_dir, video_id);
+        // Split with compression
+        let temp_chunks_dir = format!("{}/chunks", temp_dir);
+        let _ = tx.send(AppMessage::Status(
+            "[Optimized] Splitting + compressing chunks...".to_string(),
+        ));
+        let _ = tx.send(AppMessage::Progress(
+            0.2,
+            "Compressing chunks...".to_string(),
+        ));
 
-        let result = video::download_high_res(
+        let compression_settings = types::CompressionSettings {
+            target_resolution: config.compression_target_resolution,
+            ..Default::default()
+        };
+
+        let video_chunks = if Path::new(&temp_chunks_dir).exists()
+            && fs::read_dir(&temp_chunks_dir)?.next().is_some()
+        {
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Info,
+                "Using existing compressed chunks".to_string(),
+            ));
+            let chunks = video::calculate_chunks(duration);
+            let mut v_chunks = Vec::new();
+            for (i, (start, _)) in chunks.iter().enumerate() {
+                let chunk_path = format!("{}/chunk_{}.mp4", temp_chunks_dir, i);
+                if Path::new(&chunk_path).exists() {
+                    v_chunks.push(types::VideoChunk {
+                        start_seconds: *start,
+                        file_path: chunk_path,
+                    });
+                }
+            }
+            if v_chunks.is_empty() {
+                compression::split_and_compress(
+                    &source_high_res,
+                    &temp_chunks_dir,
+                    &video::calculate_chunks(duration),
+                    &compression_settings,
+                    cancellation_token.clone(),
+                )
+                .await?
+            } else {
+                v_chunks
+            }
+        } else {
+            let chunks = video::calculate_chunks(duration);
+            compression::split_and_compress(
+                &source_high_res,
+                &temp_chunks_dir,
+                &chunks,
+                &compression_settings,
+                cancellation_token.clone(),
+            )
+            .await?
+        };
+
+        let _ = tx.send(AppMessage::Log(
+            LogLevel::Success,
+            format!("Created {} compressed chunks", video_chunks.len()),
+        ));
+
+        // Continue with Gemini analysis (same as original pipeline)
+        analyze_chunks_with_gemini(
+            &tx,
+            &config,
+            &video_chunks,
+            &mut all_moments,
             &url,
-            &output_file,
-            config.use_cookies,
-            &config.cookies_path,
-            None,
+            &temp_dir,
+            &temp_json_path,
             cancellation_token.clone(),
         )
-        .await;
+        .await?;
+    } else {
+        // === ORIGINAL PIPELINE ===
+        // Download low-res, split, analyze
+        let temp_low_res = format!("{}/low_res.mp4", temp_dir);
 
-        if let Err(e) = result {
-            if e.to_string().contains("cancelled") {
-                return Ok((Vec::new(), None));
-            }
-            return Err(e);
+        if !Path::new(&temp_low_res).exists() {
+            let _ = tx.send(AppMessage::Status(
+                "Downloading Low-Res video...".to_string(),
+            ));
+            let _ = tx.send(AppMessage::Progress(0.1, "Downloading...".to_string()));
+
+            video::download_low_res(
+                &url,
+                &temp_low_res,
+                config.use_cookies,
+                &config.cookies_path,
+                cancellation_token.clone(),
+            )
+            .await
+            .context("Failed to download low-res video")?;
+
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Success,
+                "Low-res video downloaded".to_string(),
+            ));
+        } else {
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Info,
+                "Using cached low-res video".to_string(),
+            ));
         }
 
-        let _ = tx.send(AppMessage::Complete(format!(
-            "Full video saved to: {}",
-            output_file
-        )));
+        // Get video duration
+        let duration = video::get_video_duration(&temp_low_res)?;
+        let _ = tx.send(AppMessage::Log(
+            LogLevel::Info,
+            format!("Video duration: {} seconds", duration),
+        ));
 
-        return Ok((Vec::new(), Some(config.default_output_dir.clone())));
+        // Split into chunks
+        let temp_chunks_dir = format!("{}/chunks", temp_dir);
+        let _ = tx.send(AppMessage::Status(
+            "Splitting video into chunks...".to_string(),
+        ));
+        let _ = tx.send(AppMessage::Progress(0.2, "Splitting...".to_string()));
+
+        let video_chunks = if Path::new(&temp_chunks_dir).exists()
+            && fs::read_dir(&temp_chunks_dir)?.next().is_some()
+        {
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Info,
+                "Using existing video chunks".to_string(),
+            ));
+            let chunks = video::calculate_chunks(duration);
+            let mut v_chunks = Vec::new();
+            for (i, (start, _)) in chunks.iter().enumerate() {
+                let chunk_path = format!("{}/chunk_{}.mp4", temp_chunks_dir, i);
+                if Path::new(&chunk_path).exists() {
+                    v_chunks.push(types::VideoChunk {
+                        start_seconds: *start,
+                        file_path: chunk_path,
+                    });
+                }
+            }
+            if v_chunks.is_empty() {
+                video::split_video(
+                    &temp_low_res,
+                    &temp_chunks_dir,
+                    &video::calculate_chunks(duration),
+                    cancellation_token.clone(),
+                )
+                .await?
+            } else {
+                v_chunks
+            }
+        } else {
+            let chunks = video::calculate_chunks(duration);
+            video::split_video(
+                &temp_low_res,
+                &temp_chunks_dir,
+                &chunks,
+                cancellation_token.clone(),
+            )
+            .await?
+        };
+
+        let _ = tx.send(AppMessage::Log(
+            LogLevel::Success,
+            format!("Created {} chunks", video_chunks.len()),
+        ));
+
+        // Analyze chunks with Gemini
+        analyze_chunks_with_gemini(
+            &tx,
+            &config,
+            &video_chunks,
+            &mut all_moments,
+            &url,
+            &temp_dir,
+            &temp_json_path,
+            cancellation_token.clone(),
+        )
+        .await?;
+    } // end of pipeline mode selection
+
+    // Check if we found anything
+    if all_moments.is_empty() {
+        let _ = tx.send(AppMessage::Log(
+            LogLevel::Warning,
+            "No suitable moments found".to_string(),
+        ));
+        cleanup_temp_dir(&temp_dir)?;
+        fs::remove_file(&temp_json_path).ok();
+        return Ok((all_moments, None));
     }
 
     // Save final moments
@@ -1087,16 +1103,6 @@ async fn run_processing(
         ));
     }
     fs::write(&moments_txt, &txt_content)?;
-
-    if all_moments.is_empty() {
-        let _ = tx.send(AppMessage::Log(
-            LogLevel::Warning,
-            "No suitable moments found".to_string(),
-        ));
-        cleanup_temp_dir(&temp_dir)?;
-        fs::remove_file(&temp_json_path).ok();
-        return Ok((all_moments, None));
-    }
 
     // Auto-extract if enabled, otherwise we would ask
     let generate_shorts = config.extract_shorts_when_finished_moments;
@@ -1198,6 +1204,110 @@ async fn run_extraction(
                 LogLevel::Success,
                 format!("Created: short_{}.mp4", i + 1),
             ));
+
+            // === WHISPER SUBTITLE GENERATION ===
+            #[cfg(feature = "whisper")]
+            if config.enable_subtitles {
+                let _ = tx.send(AppMessage::Status(format!(
+                    "Generating subtitles for clip {}...",
+                    i + 1
+                )));
+
+                // Resolve model path
+                let model_path = if config.whisper_model_path == "auto" {
+                    match whisper::get_or_download_model(&whisper::default_model_dir()).await {
+                        Ok(path) => path,
+                        Err(e) => {
+                            let _ = tx.send(AppMessage::Log(
+                                LogLevel::Warning,
+                                format!("Could not get Whisper model: {}", e),
+                            ));
+                            continue;
+                        }
+                    }
+                } else {
+                    config.whisper_model_path.clone()
+                };
+
+                let wav_path = format!("{}/clip_{}_audio.wav", temp_dir, i + 1);
+                let ass_path = output_path.replace(".mp4", ".ass");
+
+                if let Err(e) = whisper::extract_audio_wav(&output_path, &wav_path).await {
+                    let _ = tx.send(AppMessage::Log(
+                        LogLevel::Warning,
+                        format!("Audio extraction failed for clip {}: {}", i + 1, e),
+                    ));
+                } else {
+                    match whisper::transcribe(&wav_path, &model_path) {
+                        Ok(segments) => {
+                            if !segments.is_empty() {
+                                if let Err(e) = whisper::generate_ass_subtitle(&segments, &ass_path)
+                                {
+                                    let _ = tx.send(AppMessage::Log(
+                                        LogLevel::Warning,
+                                        format!("ASS generation failed: {}", e),
+                                    ));
+                                } else {
+                                    let _ = tx.send(AppMessage::Log(
+                                        LogLevel::Success,
+                                        format!("Subtitles generated for clip {}", i + 1),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMessage::Log(
+                                LogLevel::Warning,
+                                format!("Transcription failed for clip {}: {}", i + 1, e),
+                            ));
+                        }
+                    }
+                    // Cleanup WAV
+                    fs::remove_file(&wav_path).ok();
+                }
+            }
+
+            // === FACE TRACKING ===
+            if config.enable_face_tracking {
+                let _ = tx.send(AppMessage::Status(format!(
+                    "Analyzing faces in clip {}...",
+                    i + 1
+                )));
+
+                match facetracking::analyze_clip_faces(&output_path, &temp_dir, 2.0).await {
+                    Ok(tracking_data) => {
+                        let json_path = output_path.replace(".mp4", "_tracking.json");
+                        if let Err(e) = facetracking::save_tracking_data(&tracking_data, &json_path)
+                        {
+                            let _ = tx.send(AppMessage::Log(
+                                LogLevel::Warning,
+                                format!("Failed to save tracking data: {}", e),
+                            ));
+                        } else {
+                            let streamer_info = if tracking_data.has_streamer {
+                                "streamer detected"
+                            } else {
+                                "no streamer"
+                            };
+                            let _ = tx.send(AppMessage::Log(
+                                LogLevel::Info,
+                                format!(
+                                    "Face tracking clip {}: {} regions, {}",
+                                    i + 1,
+                                    tracking_data.face_regions.len(),
+                                    streamer_info
+                                ),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMessage::Log(
+                            LogLevel::Warning,
+                            format!("Face tracking failed for clip {}: {}", i + 1, e),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -1212,6 +1322,109 @@ async fn run_extraction(
     )));
 
     Ok((all_moments, Some(shorts_dir)))
+}
+
+/// Helper: Analyze video chunks with Gemini AI
+/// This is shared between both the original and optimized pipelines.
+async fn analyze_chunks_with_gemini(
+    tx: &TuiSender,
+    config: &AppConfig,
+    video_chunks: &[types::VideoChunk],
+    all_moments: &mut Vec<VideoMoment>,
+    url: &str,
+    _temp_dir: &str,
+    temp_json_path: &str,
+    cancellation_token: Arc<AtomicBool>,
+) -> Result<()> {
+    let _ = tx.send(AppMessage::Status(
+        "Analyzing with Gemini AI...".to_string(),
+    ));
+
+    // Initialize Gemini Client
+    let enabled_keys: Vec<(String, String)> = config
+        .google_api_keys
+        .iter()
+        .filter(|k| k.enabled)
+        .map(|k| (k.name.clone(), k.value.clone()))
+        .collect();
+
+    if enabled_keys.is_empty() {
+        let _ = tx.send(AppMessage::Error(
+            "No enabled API keys found. Please check settings.".to_string(),
+        ));
+        return Ok(());
+    }
+
+    let gemini = GeminiClient::new(enabled_keys, config.use_fast_model);
+
+    for (i, chunk) in video_chunks.iter().enumerate() {
+        // Check cancellation
+        if cancellation_token.load(Ordering::Relaxed) {
+            let _ = tx.send(AppMessage::Status("Cancelled".to_string()));
+            let _ = tx.send(AppMessage::Log(
+                LogLevel::Warning,
+                "Processing cancelled by user".to_string(),
+            ));
+            return Ok(());
+        }
+
+        let progress = 0.3 + (0.5 * (i as f64 / video_chunks.len() as f64));
+        let _ = tx.send(AppMessage::Progress(
+            progress,
+            format!("Analyzing chunk {}/{}", i + 1, video_chunks.len()),
+        ));
+        let _ = tx.send(AppMessage::Status(format!(
+            "Analyzing chunk {}/{}...",
+            i + 1,
+            video_chunks.len()
+        )));
+
+        let tx_clone = tx.clone();
+        let status_cb = move |msg: String| {
+            let _ = tx_clone.send(AppMessage::Status(msg));
+        };
+
+        match gemini
+            .process_chunk(
+                &chunk.file_path,
+                chunk.start_seconds,
+                status_cb,
+                cancellation_token.clone(),
+            )
+            .await
+        {
+            Ok(moments) => {
+                let _ = tx.send(AppMessage::Log(
+                    LogLevel::Info,
+                    format!("Chunk {}: Found {} moments", i + 1, moments.len()),
+                ));
+                for m in &moments {
+                    let _ = tx.send(AppMessage::MomentFound(m.clone()));
+                }
+                all_moments.extend(moments);
+                save_session(temp_json_path, url, all_moments, _temp_dir)?;
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("cancelled") {
+                    return Ok(());
+                }
+                if err_msg.contains("No API keys available") {
+                    let _ = tx.send(AppMessage::Error(
+                        "API Keys Exhausted during analysis.".to_string(),
+                    ));
+                    break;
+                } else {
+                    let _ = tx.send(AppMessage::Log(
+                        LogLevel::Warning,
+                        format!("Chunk {} analysis failed: {}", i + 1, e),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Save session state for resumption

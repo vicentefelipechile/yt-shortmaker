@@ -317,6 +317,29 @@ impl App {
                     kind: SettingType::Bool,
                     description: "Use faster model (gemini-3-flash)".to_string(),
                 },
+                SettingItem {
+                    name: "Enable Subtitles".to_string(),
+                    key: "enable_subtitles".to_string(),
+                    value: config.enable_subtitles.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Auto-generate subtitles with Whisper (requires whisper feature)"
+                        .to_string(),
+                },
+                SettingItem {
+                    name: "Enable Face Tracking".to_string(),
+                    key: "enable_face_tracking".to_string(),
+                    value: config.enable_face_tracking.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Analyze clips for face/streamer detection".to_string(),
+                },
+                SettingItem {
+                    name: "Optimized Pipeline".to_string(),
+                    key: "use_optimized_pipeline".to_string(),
+                    value: config.use_optimized_pipeline.to_string(),
+                    kind: SettingType::Bool,
+                    description: "Download HQ first, then compress chunks for AI analysis"
+                        .to_string(),
+                },
             ];
         }
     }
@@ -341,6 +364,13 @@ impl App {
                     }
                     "zoom" => config.shorts_config.main_video_zoom = val.parse().unwrap_or(0.7),
                     "fast_model" => config.use_fast_model = val.parse().unwrap_or(true),
+                    "enable_subtitles" => config.enable_subtitles = val.parse().unwrap_or(false),
+                    "enable_face_tracking" => {
+                        config.enable_face_tracking = val.parse().unwrap_or(false)
+                    }
+                    "use_optimized_pipeline" => {
+                        config.use_optimized_pipeline = val.parse().unwrap_or(false)
+                    }
                     _ => {}
                 }
 

@@ -12,6 +12,9 @@ A robust, interactive CLI tool built in Rust to automate the creation of YouTube
 - **🔄 Session Recovery**: Automatically resumes interrupted sessions from where you left off.
 - **🎨 Smart Composition**: Creates layered shorts with blurred backgrounds and customizable zoom/positioning.
 - **🍪 Cookie Support**: Integrated support for `yt-dlp` cookies to handle age-restricted or premium content.
+- **📝 Auto Subtitles** *(optional)*: Generate subtitles automatically using Whisper speech-to-text.
+- **👤 Face Tracking**: Detect face/streamer regions in clips using FFmpeg for dynamic crop optimization.
+- **⚡ Optimized Pipeline**: Alternative workflow that downloads HQ first and compresses chunks for faster AI analysis.
 
 ## 📋 Prerequisites
 
@@ -52,6 +55,9 @@ cd yt-shortmaker
 # Build the project
 cargo build --release
 
+# Build with Whisper subtitle support (requires CMake + C++ compiler)
+cargo build --release --features whisper
+
 # Run the application
 cargo run --release
 ```
@@ -80,15 +86,20 @@ You can customize the following directly in the app:
 - **Auto Extract**: Automatically generate shorts after analysis.
 - **Shorts Style**: Adjust background opacity and main video zoom.
 - **Cookies**: Path to your cookies file.
+- **Enable Subtitles**: Auto-generate `.ass` subtitles per clip (requires `whisper` feature).
+- **Enable Face Tracking**: Analyze clips for face/streamer detection, saves JSON metadata.
+- **Optimized Pipeline**: Download HQ video first, then compress chunks for AI — uses more disk but faster analysis.
 
 ## 📁 Output Structure
 
 ```
 output/
-├── moments.json       # Raw JSON of identified moments
-├── moments.txt        # Human-readable list
-└── shorts/
+├── moments.json               # Raw JSON of identified moments
+├── moments.txt                # Human-readable list
+└── shorts_YYYYMMDD_HHMMSS/
     ├── short_1_funny.mp4
+    ├── short_1_funny.ass      # Subtitles (if enabled)
+    ├── short_1_funny_tracking.json  # Face tracking data (if enabled)
     ├── short_2_interesting.mp4
     └── ...
 ```
@@ -115,6 +126,12 @@ cargo run
 # Run tests
 cargo test
 ```
+
+## 🧩 Optional Features
+
+| Feature | Description | Requirements |
+|---------|-------------|-------------|
+| `whisper` | Real-time subtitle generation via Whisper | CMake, C++ compiler |
 
 ## 📄 License
 
