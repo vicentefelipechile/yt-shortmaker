@@ -160,3 +160,4 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
+          generate_release_notes: true
