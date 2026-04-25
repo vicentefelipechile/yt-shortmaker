@@ -159,9 +159,9 @@ impl GeminiClient {
     /// Create a new Gemini client
     pub fn new(api_keys: Vec<(String, String)>, use_fast_model: bool) -> Self {
         let model = if use_fast_model {
-            "gemini-3-flash-preview".to_string()
+            "gemini-flash-latest".to_string()
         } else {
-            "gemini-3-pro-preview".to_string()
+            "gemini-pro-latest".to_string()
         };
 
         let keys = api_keys

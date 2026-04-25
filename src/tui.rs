@@ -315,7 +315,7 @@ impl App {
                     key: "fast_model".to_string(),
                     value: config.use_fast_model.to_string(),
                     kind: SettingType::Bool,
-                    description: "Use faster model (gemini-3-flash)".to_string(),
+                    description: "Use faster model (gemini-flash-latest)".to_string(),
                 },
             ];
         }

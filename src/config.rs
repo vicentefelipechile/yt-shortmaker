@@ -143,7 +143,7 @@ pub struct AppConfig {
     /// Shorts transformation configuration
     #[serde(default)]
     pub shorts_config: ShortsConfig,
-    /// Whether to use the fast model (gemini-3-flash-preview) or pro model
+    /// Whether to use the fast model (gemini-flash-latest) or pro model
     #[serde(default = "default_true")]
     pub use_fast_model: bool,
 
