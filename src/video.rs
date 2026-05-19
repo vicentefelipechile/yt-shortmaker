@@ -315,8 +315,8 @@ pub async fn download_high_res(
 /// Calculate video chunks for processing
 /// Logic: Split by 30 mins. If last chunk <= 45 mins, merge it.
 pub fn calculate_chunks(total_duration_seconds: u64) -> Vec<(u64, u64)> {
-    let chunk_size = 30 * 60; // 30 mins in seconds
-    let max_last_chunk = 45 * 60; // 45 mins in seconds
+    let chunk_size = 10 * 60; // 10 mins in seconds
+    let max_last_chunk = 15 * 60; // 45 mins in seconds
     let mut chunks = Vec::new();
     let mut current_time = 0;
 
