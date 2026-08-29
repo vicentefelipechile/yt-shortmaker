@@ -29,6 +29,10 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_export_title(t!("export_standalone").to_string().into());
     app.set_tr_export_desc(t!("export_standalone_desc").to_string().into());
     app.set_tr_keys_title(t!("nav_keys").to_string().into());
+    app.set_tr_settings_title(t!("settings").to_string().into());
+    app.set_tr_save(t!("save").to_string().into());
+    app.set_tr_analyze(t!("new_project_start_analyze").to_string().into());
+    app.set_tr_add_moment(t!("status_moment_added").to_string().into());
 }
 
 // -------------------------------------------------------------------------------------------------
