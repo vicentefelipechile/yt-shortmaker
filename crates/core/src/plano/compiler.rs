@@ -77,7 +77,10 @@ pub fn build_ffmpeg_filter(plano: &Plano, clip_path: &str) -> (String, Vec<Strin
 
         match obj {
             PlanoObject::Clip {
-                position, crop, fit, ..
+                position,
+                crop,
+                fit,
+                ..
             } => {
                 let w = position.width.resolve(OUTPUT_WIDTH);
                 let h = position.height.resolve(OUTPUT_HEIGHT);
@@ -91,7 +94,8 @@ pub fn build_ffmpeg_filter(plano: &Plano, clip_path: &str) -> (String, Vec<Strin
                         let y_to = c.y_to.unwrap_or(0);
                         if x_to > x_from {
                             let crop_w = x_to - x_from;
-                            base_filter = format!("{}crop={}:ih:{}:0,", base_filter, crop_w, x_from);
+                            base_filter =
+                                format!("{}crop={}:ih:{}:0,", base_filter, crop_w, x_from);
                         }
                         if y_to > y_from {
                             let crop_h = y_to - y_from;
@@ -141,7 +145,10 @@ pub fn build_ffmpeg_filter(plano: &Plano, clip_path: &str) -> (String, Vec<Strin
                     let y = position.y.resolve(OUTPUT_HEIGHT, h);
                     let mut img_filter = format!("[{}:v]scale={}:{}", input_idx, w, h);
                     if *opacity < 1.0 {
-                        img_filter = format!("{},format=rgba,colorchannelmixer=aa={}", img_filter, opacity);
+                        img_filter = format!(
+                            "{},format=rgba,colorchannelmixer=aa={}",
+                            img_filter, opacity
+                        );
                     }
                     ctx.filters.push(format!("{}[img{}]", img_filter, idx));
                     ctx.filters.push(format!(
@@ -184,7 +191,10 @@ pub fn build_ffmpeg_filter(plano: &Plano, clip_path: &str) -> (String, Vec<Strin
                     };
                     let mut vid_filter = format!("{},setsar=1", scale_filter);
                     if *opacity < 1.0 {
-                        vid_filter = format!("{},format=rgba,colorchannelmixer=aa={}", vid_filter, opacity);
+                        vid_filter = format!(
+                            "{},format=rgba,colorchannelmixer=aa={}",
+                            vid_filter, opacity
+                        );
                     }
                     ctx.filters.push(format!("{}[vid{}]", vid_filter, idx));
                     ctx.filters.push(format!(

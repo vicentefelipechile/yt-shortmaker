@@ -81,10 +81,6 @@ impl ProviderRegistry {
         self.providers.values().cloned().collect()
     }
 
-    pub fn set_active(&mut self, id: impl Into<String>) {
-        self.active_id = id.into();
-    }
-
     pub fn active_id(&self) -> &str {
         &self.active_id
     }
