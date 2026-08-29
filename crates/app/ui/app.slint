@@ -1,4 +1,149 @@
-import { LineEdit, ScrollView, Button, ComboBox } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+// =========================================================================================================
+// Shared UI Components
+// =========================================================================================================
+
+component SquareButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 34px;
+    min-width: 90px;
+    background: primary ? #0878c9 : #252629;
+    border-width: 1px;
+    border-color: primary ? #0878c9 : #3a3c42;
+
+    states [
+        hover when touch.has-hover : {
+            background: primary ? #0a8be4 : #303237;
+        }
+    ]
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: #f4f4f5;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component SquareInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text: "";
+    in property <bool> password: false;
+    height: 34px;
+    background: #202124;
+    border-width: 1px;
+    border-color: #3d4149;
+
+    if root.text == "": Text {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text: root.placeholder-text;
+        color: #858b96;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    if root.password: TextInput {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text <=> root.text;
+        color: #f4f4f5;
+        font-size: 13px;
+        vertical-alignment: center;
+        input-type: InputType.password;
+    }
+
+    if !root.password: TextInput {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text <=> root.text;
+        color: #f4f4f5;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+}
+
+component SquareChoice inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback chosen;
+    width: 132px;
+    height: 32px;
+    background: selected ? #2a2a2e : #202124;
+    border-width: 1px;
+    border-color: selected ? #6366f1 : #3d4149;
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: selected ? #ffffff : #b7bbc3;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.chosen(); }
+    }
+}
+
+component SquareToggle inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked: false;
+    callback toggled;
+    height: 26px;
+
+    Rectangle {
+        x: 0px;
+        y: 4px;
+        width: 18px;
+        height: 18px;
+        background: root.checked ? #6366f1 : #202124;
+        border-width: 1px;
+        border-color: root.checked ? #6366f1 : #555a64;
+        if root.checked: Text {
+            width: parent.width;
+            height: parent.height;
+            text: "x";
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 28px;
+        width: parent.width - 28px;
+        height: parent.height;
+        text: root.label;
+        color: #d4d4d8;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -6,18 +151,34 @@ component NavItem inherits Rectangle {
     callback clicked;
     height: 32px;
     background: active ? #2a2a2e : transparent;
-    states [ hover when touch.has-hover && !active : { background: #232326; } ]
-    if active: Rectangle { width: 2px; height: parent.height; x: 0px; background: #6366f1; }
-    touch := TouchArea { clicked => { root.clicked(); } }
+
+    if active: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 2px;
+        height: parent.height;
+        background: #6366f1;
+    }
+
     Text {
         x: 14px;
+        width: parent.width - 14px;
+        height: parent.height;
         text: root.label;
         color: active ? #ffffff : #a1a1aa;
         font-size: 13px;
         font-weight: active ? 600 : 400;
         vertical-alignment: center;
     }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
 }
+
+// =========================================================================================================
+// Main Window
+// =========================================================================================================
 
 export component MainWindow inherits Window {
     title: "yt-shortmaker v2";
@@ -36,44 +197,88 @@ export component MainWindow inherits Window {
     in-out property <string> core-version: "2.0.0";
     in-out property <string> output-dir: "";
     in-out property <string> language: "en";
-    in-out property <string> new-key-name: "";
-    in-out property <string> new-key-value: "";
     in property <string> keys-list: "";
+    in-out property <string> chunk-size-minutes: "10";
+    in-out property <bool> auto-extract: false;
+    in-out property <bool> use-cookies: false;
+    in-out property <string> cookies-path: "";
+    in-out property <string> naming-template: "short_%Y%m%d_%H%M%S";
+    in-out property <bool> use-fast-model: true;
+    in-out property <string> model-fast-name: "gemini-2.5-flash";
+    in-out property <string> model-pro-name: "gemini-2.5-pro";
+    in-out property <string> new-key-value: "";
 
     in property <string> tr-navigate: "Navigate";
     in property <string> tr-home: "Home";
     in property <string> tr-new-project: "New Project";
     in property <string> tr-export-standalone: "Export Standalone";
     in property <string> tr-settings: "Settings";
-    in property <string> tr-keys: "Keys";
+    in property <string> tr-keys: "AI / Keys";
     in property <string> tr-home-recent: "Recent projects";
     in property <string> tr-home-empty: "No projects yet. Create a new project to start.";
     in property <string> tr-new-project-title: "New Project";
+    in property <string> tr-new-project-description: "Import a video, then let the analyzer find the strongest moments.";
+    in property <string> tr-source-step: "Source video";
+    in property <string> tr-analysis-step: "Analysis";
+    in property <string> tr-analysis-settings: "Analysis settings are managed in Settings and AI / Keys.";
     in property <string> tr-url-label: "YouTube URL";
     in property <string> tr-fetch: "Fetch Info";
     in property <string> tr-export-title: "Export Standalone";
     in property <string> tr-export-desc: "Select clips and a plano to export without AI.";
-    in property <string> tr-keys-title: "API Keys";
+    in property <string> tr-keys-title: "AI / Keys";
+    in property <string> tr-keys-description: "Configure the provider and manage the credentials used by analysis.";
     in property <string> tr-settings-title: "Settings";
-    in property <string> tr-save: "Save";
-    in property <string> tr-analyze: "Analyze";
-    in property <string> tr-add-moment: "Add moment";
+    in property <string> tr-settings-description: "Defaults used when importing, analyzing and exporting videos.";
+    in property <string> tr-general-section: "GENERAL";
+    in property <string> tr-processing-section: "PROCESSING";
+    in property <string> tr-auth-section: "AUTHENTICATED SOURCES";
+    in property <string> tr-export-section: "EXPORT";
+    in property <string> tr-save: "Save changes";
+    in property <string> tr-analyze: "Start analysis";
     in property <string> tr-browse: "Browse";
     in property <string> tr-output-dir: "Output directory";
     in property <string> tr-language: "Language";
-    in property <string> tr-key-name: "Name";
-    in property <string> tr-key-value: "API Key";
-    in property <string> tr-add: "Add";
-    in property <string> tr-delete: "Delete";
+    in property <string> tr-key-value: "API key";
+    in property <string> tr-add: "Add key";
+    in property <string> tr-chunk-size: "Chunk duration (minutes)";
+    in property <string> tr-auto-extract: "Extract shorts automatically after analysis";
+    in property <string> tr-use-cookies: "Use browser cookies for yt-dlp";
+    in property <string> tr-cookies-path: "Cookies file";
+    in property <string> tr-naming-template: "Output naming template";
+    in property <string> tr-model: "Analysis model";
+    in property <string> tr-ai-description: "Choose the model used for video analysis. This setting is shared by every project.";
+    in property <string> tr-ai-section: "AI PROVIDER";
+    in property <string> tr-keys-section: "API KEYS";
+    in property <string> tr-key-description: "Paste an API key. Its display name is generated automatically.";
+    in property <string> tr-no-keys: "No API keys configured yet.";
+    in property <string> tr-export-workspace: "Export workspace";
+    in property <string> tr-export-workspace-description: "Plano editor and batch export will appear here.";
+    in property <string> tr-deps-missing: "Missing tools";
+    in property <string> tr-deps-recheck: "Re-check";
+    in property <string> tr-toggle-key: "Toggle last";
+    in property <string> tr-delete-key: "Delete last";
+    in property <string> tr-test-connection: "Test connection";
+    in property <string> tr-deps-installing: "Installing tools...";
+    in property <string> tr-deps-install: "Install automatically";
+    in property <string> deps-error: "";
+    in property <bool> deps-ok: true;
+    in property <bool> deps-installing: false;
+    in property <string> home-recent-list: "";
+    in property <string> settings-status: "";
+    in property <string> keys-status: "";
 
     callback navigate(string);
     callback fetch-info();
     callback start-analyze();
-    callback add-moment();
     callback save-settings();
+    callback save-ai-settings();
     callback browse-output();
+    callback browse-cookies();
     callback add-key();
-    callback delete-key(int);
+    callback delete-key();
+    callback toggle-key();
+    callback test-connection();
+    callback check-deps();
 
     HorizontalLayout {
         Rectangle {
@@ -83,15 +288,18 @@ export component MainWindow inherits Window {
                 padding: 14px;
                 spacing: 10px;
                 alignment: start;
+
                 VerticalLayout {
                     spacing: 2px;
                     Text { text: "yt-shortmaker v2"; color: #ffffff; font-size: 14px; font-weight: 700; }
                     Text { text: core-version; color: #71717a; font-size: 11px; }
                 }
+
                 Rectangle { height: 1px; background: #27272a; }
+                Text { text: root.tr-navigate; color: #71717a; font-size: 11px; font-weight: 600; }
+
                 VerticalLayout {
                     spacing: 2px;
-                    Text { text: root.tr-navigate; color: #71717a; font-size: 11px; font-weight: 600; }
                     NavItem { label: root.tr-home; active: route == "home"; clicked => { root.navigate("home"); } }
                     NavItem { label: root.tr-new-project; active: route == "new-project"; clicked => { root.navigate("new-project"); } }
                     NavItem { label: root.tr-export-standalone; active: route == "export"; clicked => { root.navigate("export"); } }
@@ -100,8 +308,11 @@ export component MainWindow inherits Window {
                 }
             }
         }
+
         Rectangle { width: 1px; background: #27272a; }
+
         Rectangle {
+            horizontal-stretch: 1;
             background: #121214;
             ScrollView {
                 VerticalLayout {
@@ -112,9 +323,25 @@ export component MainWindow inherits Window {
                     if route == "home": VerticalLayout {
                         alignment: start;
                         spacing: 10px;
+                        if !root.deps-ok: Rectangle {
+                            background: #2a1515;
+                            border-width: 1px;
+                            border-color: #7f1d1d;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                Text { text: root.tr-deps-missing; color: #fca5a5; font-size: 12px; font-weight: 700; }
+                                if root.deps-installing: Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
+                                if !root.deps-installing: VerticalLayout {
+                                    spacing: 8px;
+                                    Text { text: root.deps-error; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
+                                    SquareButton { label: root.tr-deps-install; width: 160px; clicked => { root.check-deps(); } }
+                                }
+                            }
+                        }
                         Text { text: root.tr-home-recent; color: #ffffff; font-size: 17px; font-weight: 700; }
                         Rectangle { height: 1px; background: #27272a; }
-                        Rectangle {
+                        if root.home-recent-list == "": Rectangle {
                             height: 120px;
                             background: #1a1a1e;
                             border-width: 1px;
@@ -123,8 +350,18 @@ export component MainWindow inherits Window {
                                 padding: 16px;
                                 spacing: 10px;
                                 alignment: center;
-                                Text { text: root.tr-home-empty; color: #a1a1aa; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
-                                Button { text: root.tr-new-project; primary: true; clicked => { root.navigate("new-project"); } }
+                                Text { text: root.tr-home-empty; color: #c3c6cc; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
+                                SquareButton { label: root.tr-new-project; primary: true; width: 126px; clicked => { root.navigate("new-project"); } }
+                            }
+                        }
+                        if root.home-recent-list != "": Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                Text { text: root.home-recent-list; color: #d4d4d8; font-size: 12px; wrap: word-wrap; }
                             }
                         }
                     }
@@ -133,26 +370,43 @@ export component MainWindow inherits Window {
                         alignment: start;
                         spacing: 12px;
                         Text { text: root.tr-new-project-title; color: #ffffff; font-size: 17px; font-weight: 700; }
-                        Rectangle { height: 1px; background: #27272a; }
-                        Text { text: root.tr-url-label; color: #d4d4d8; font-size: 12px; font-weight: 600; }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            LineEdit {
-                                placeholder-text: "https://youtube.com/watch?v=...";
-                                text <=> root.url-input;
-                                horizontal-stretch: 1;
-                                height: 34px;
+                        Text { text: root.tr-new-project-description; color: #b9bdc5; font-size: 13px; }
+                        if !root.deps-ok: Rectangle {
+                            background: #2a1515;
+                            border-width: 1px;
+                            border-color: #7f1d1d;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                Text { text: root.tr-deps-missing; color: #fca5a5; font-size: 12px; font-weight: 700; }
+                                if root.deps-installing: Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
+                                if !root.deps-installing: VerticalLayout {
+                                    spacing: 8px;
+                                    Text { text: root.deps-error; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
+                                    SquareButton { label: root.tr-deps-install; width: 160px; clicked => { root.check-deps(); } }
+                                }
                             }
-                            Button { text: root.tr-fetch; primary: true; height: 34px; width: 110px; clicked => { root.fetch-info(); } }
                         }
-                        if url-error != "": Text { text: url-error; color: #ef4444; font-size: 12px; wrap: word-wrap; }
-                        if video-title != "": Text { text: video-title; color: #a1a1aa; font-size: 12px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: #27272a; }
+                        Text { text: root.tr-url-label; color: #e4e4e7; font-size: 12px; font-weight: 600; }
                         HorizontalLayout {
                             spacing: 8px;
-                            Button { text: root.tr-analyze; primary: true; height: 34px; clicked => { root.start-analyze(); } }
-                            Button { text: root.tr-add-moment; height: 34px; clicked => { root.add-moment(); } }
-                            Text { text: status-msg; color: #a1a1aa; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                            SquareInput {
+                                text <=> root.url-input;
+                                placeholder-text: "https://youtube.com/watch?v=...";
+                                horizontal-stretch: 1;
+                            }
+                            SquareButton { label: root.tr-fetch; primary: true; width: 110px; clicked => { root.fetch-info(); } }
+                        }
+                        if url-error != "": Text { text: url-error; color: #f87171; font-size: 12px; wrap: word-wrap; }
+                        if video-title != "": Text { text: video-title; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
+                        Rectangle { height: 1px; background: #27272a; }
+                        Text { text: root.tr-analysis-step; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        Text { text: root.tr-analysis-settings; color: #9ca3af; font-size: 12px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            SquareButton { label: root.tr-analyze; primary: true; width: 140px; clicked => { root.start-analyze(); } }
+                            Text { text: status-msg; color: #c3c6cc; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
                         }
                         Rectangle {
                             height: 4px;
@@ -166,32 +420,65 @@ export component MainWindow inherits Window {
                         spacing: 12px;
                         Text { text: root.tr-export-title; color: #ffffff; font-size: 17px; font-weight: 700; }
                         Rectangle { height: 1px; background: #27272a; }
-                        Text { text: root.tr-export-desc; color: #a1a1aa; font-size: 13px; wrap: word-wrap; }
+                        Text { text: root.tr-export-desc; color: #b9bdc5; font-size: 13px; wrap: word-wrap; }
+                        Rectangle {
+                            height: 120px;
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            Text { x: 16px; y: 16px; text: root.tr-export-workspace; color: #e4e4e7; font-size: 13px; font-weight: 600; }
+                            Text { x: 16px; y: 46px; text: root.tr-export-workspace-description; color: #b9bdc5; font-size: 12px; }
+                        }
                     }
 
                     if route == "settings": VerticalLayout {
                         alignment: start;
                         spacing: 14px;
                         Text { text: root.tr-settings-title; color: #ffffff; font-size: 17px; font-weight: 700; }
+                        Text { text: root.tr-settings-description; color: #b9bdc5; font-size: 13px; }
                         Rectangle { height: 1px; background: #27272a; }
-                        VerticalLayout {
-                            spacing: 6px;
-                            Text { text: root.tr-output-dir; color: #d4d4d8; font-size: 12px; font-weight: 600; }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                LineEdit { text <=> root.output-dir; placeholder-text: "/path/to/output"; horizontal-stretch: 1; height: 34px; }
-                                Button { text: root.tr-browse; height: 34px; width: 90px; clicked => { root.browse-output(); } }
-                            }
-                        }
-                        VerticalLayout {
-                            spacing: 6px;
-                            Text { text: root.tr-language; color: #d4d4d8; font-size: 12px; font-weight: 600; }
-                            ComboBox { model: ["en", "es", "ru"]; current-value <=> root.language; height: 34px; }
-                        }
+
+                        Text { text: root.tr-general-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        Text { text: root.tr-output-dir; color: #e4e4e7; font-size: 12px; font-weight: 600; }
                         HorizontalLayout {
                             spacing: 8px;
-                            Button { text: root.tr-save; primary: true; height: 34px; width: 100px; clicked => { root.save-settings(); } }
-                            Text { text: status-msg; color: #22c55e; font-size: 12px; vertical-alignment: center; }
+                            SquareInput { text <=> root.output-dir; placeholder-text: "/path/to/output"; horizontal-stretch: 1; }
+                            SquareButton { label: root.tr-browse; width: 90px; clicked => { root.browse-output(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 24px;
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text { text: root.tr-language; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    SquareChoice { label: "en"; selected: root.language == "en"; chosen => { root.language = "en"; } }
+                                    SquareChoice { label: "es"; selected: root.language == "es"; chosen => { root.language = "es"; } }
+                                    SquareChoice { label: "ru"; selected: root.language == "ru"; chosen => { root.language = "ru"; } }
+                                }
+                            }
+                        }
+
+                        Text { text: root.tr-processing-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        Text { text: root.tr-chunk-size; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        SquareInput { text <=> root.chunk-size-minutes; placeholder-text: "10"; width: 140px; }
+                        SquareToggle { label: root.tr-auto-extract; checked <=> root.auto-extract; }
+
+                        Text { text: root.tr-auth-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        SquareToggle { label: root.tr-use-cookies; checked <=> root.use-cookies; }
+                        if root.use-cookies: HorizontalLayout {
+                            spacing: 8px;
+                            SquareInput { text <=> root.cookies-path; placeholder-text: "/path/to/cookies.txt"; horizontal-stretch: 1; }
+                            SquareButton { label: root.tr-browse; width: 90px; clicked => { root.browse-cookies(); } }
+                        }
+
+                        Text { text: root.tr-export-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        Text { text: root.tr-naming-template; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        SquareInput { text <=> root.naming-template; placeholder-text: "short_%Y%m%d_%H%M%S"; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            SquareButton { label: root.tr-save; primary: true; width: 110px; clicked => { root.save-settings(); } }
+                            Text { text: root.settings-status; color: #86efac; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
                         }
                     }
 
@@ -199,21 +486,37 @@ export component MainWindow inherits Window {
                         alignment: start;
                         spacing: 14px;
                         Text { text: root.tr-keys-title; color: #ffffff; font-size: 17px; font-weight: 700; }
+                        Text { text: root.tr-keys-description; color: #b9bdc5; font-size: 13px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: #27272a; }
-                        VerticalLayout {
-                            spacing: 6px;
-                            Text { text: root.tr-key-name; color: #d4d4d8; font-size: 12px; font-weight: 600; }
-                            LineEdit { text <=> root.new-key-name; placeholder-text: "Primary"; height: 34px; }
-                            Text { text: root.tr-key-value; color: #d4d4d8; font-size: 12px; font-weight: 600; }
-                            LineEdit { text <=> root.new-key-value; placeholder-text: "AIza..."; height: 34px; input-type: password; }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Button { text: root.tr-add; primary: true; height: 34px; width: 90px; clicked => { root.add-key(); } }
-                                Text { text: status-msg; color: #a1a1aa; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                            }
+
+                        Text { text: root.tr-ai-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        Text { text: root.tr-ai-description; color: #b9bdc5; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.tr-model; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            SquareChoice { label: root.model-fast-name; width: 170px; selected: root.use-fast-model; chosen => { root.use-fast-model = true; } }
+                            SquareChoice { label: root.model-pro-name; width: 170px; selected: !root.use-fast-model; chosen => { root.use-fast-model = false; } }
+                        }
+                        SquareButton { label: root.tr-save; width: 110px; clicked => { root.save-ai-settings(); } }
+
+                        Rectangle { height: 1px; background: #27272a; }
+                        Text { text: root.tr-keys-section; color: #818cf8; font-size: 11px; font-weight: 700; }
+                        Text { text: root.tr-key-description; color: #b9bdc5; font-size: 12px; }
+                        Text { text: root.tr-key-value; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            SquareInput { text <=> root.new-key-value; placeholder-text: "AIza..."; password: true; horizontal-stretch: 1; }
+                            SquareButton { label: root.tr-add; primary: true; width: 100px; clicked => { root.add-key(); } }
                         }
                         Rectangle { height: 1px; background: #27272a; }
-                        Text { text: keys-list; color: #d4d4d8; font-size: 12px; wrap: word-wrap; }
+                        Text { text: keys-list == "" ? root.tr-no-keys : keys-list; color: #d4d4d8; font-size: 12px; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            SquareButton { label: root.tr-toggle-key; width: 110px; clicked => { root.toggle-key(); } }
+                            SquareButton { label: root.tr-delete-key; width: 110px; clicked => { root.delete-key(); } }
+                            SquareButton { label: root.tr-test-connection; width: 130px; clicked => { root.test-connection(); } }
+                        }
+                        Text { text: root.keys-status; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
                     }
                 }
             }
