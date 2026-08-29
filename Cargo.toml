@@ -5,6 +5,17 @@ edition = "2021"
 description = "A robust CLI tool to automate YouTube Shorts creation from long-form content using Google Gemini AI"
 authors = ["vicentefelipechile"]
 
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app", "crates/cli"]
+
+[workspace.package]
+version = "2.0.0-alpha.1"
+edition = "2021"
+authors = ["vicentefelipechile"]
+license = "MIT"
+repository = "https://github.com/vicentefelipechile/yt-shortmaker"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
 

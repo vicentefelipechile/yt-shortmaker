@@ -1,0 +1,25 @@
+[package]
+name = "yt-shortmaker-app"
+version.workspace = true
+edition.workspace = true
+description = "Native egui app for yt-shortmaker v2"
+license.workspace = true
+
+[dependencies]
+yt-shortmaker-core = { path = "../core" }
+eframe = { version = "0.35", features = ["default"] }
+egui = "0.35"
+egui_extras = { version = "0.35", features = ["image", "svg"] }
+tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rfd = "0.17"
+open = "5.4"
+dirs = "6.0"
+rust-i18n = "4.2"
+
+[build-dependencies]
+winresource = "0.1"
