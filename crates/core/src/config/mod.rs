@@ -146,6 +146,14 @@ impl Default for AppConfig {
 pub struct AiConfig {
     pub active_provider: String,
     pub providers: HashMap<String, ProviderConfig>,
+    /// User-defined models. Each entry reuses a base provider (e.g. "gemini") but can point
+    /// to any model string valid for that provider — e.g. "gemma-3-27b-it" or "gemini-3.7-flash".
+    /// This makes the app future-proof: new Google models work without a code update.
+    #[serde(default)]
+    pub custom_models: Vec<CustomModel>,
+    /// Id of the active custom model. If None, falls back to the provider's legacy effective_model.
+    #[serde(default)]
+    pub active_model_id: Option<String>,
 }
 
 impl Default for AiConfig {
@@ -155,30 +163,142 @@ impl Default for AiConfig {
             "gemini".to_owned(),
             ProviderConfig {
                 keys: Vec::new(),
-                model: "gemini-2.5-flash".to_owned(),
-                model_pro: "gemini-2.5-pro".to_owned(),
+                // Legacy fields kept for migration; new code uses custom_models.
+                model: default_model(),
+                model_pro: default_model_pro(),
                 use_fast_model: true,
                 temperature: None,
                 media_resolution: None,
             },
         );
+        // Defaults verified 2026-08-28 via ai.google.dev/gemini-api/docs/models
+        // gemini-3.7-flash is the current stable flagship; gemma models are accessible via the Gemini API.
+        let custom_models = vec![
+            CustomModel {
+                id: "gemini-3.7-flash".to_owned(),
+                display_name: "Gemini 3.7 Flash".to_owned(),
+                base_provider: "gemini".to_owned(),
+                model_id: "gemini-3.7-flash".to_owned(),
+                temperature: None,
+                media_resolution: None,
+                enabled: true,
+            },
+            CustomModel {
+                id: "gemini-3.6-flash".to_owned(),
+                display_name: "Gemini 3.6 Flash".to_owned(),
+                base_provider: "gemini".to_owned(),
+                model_id: "gemini-3.6-flash".to_owned(),
+                temperature: None,
+                media_resolution: None,
+                enabled: true,
+            },
+            CustomModel {
+                id: "gemini-2.5-flash".to_owned(),
+                display_name: "Gemini 2.5 Flash (legacy)".to_owned(),
+                base_provider: "gemini".to_owned(),
+                model_id: "gemini-2.5-flash".to_owned(),
+                temperature: None,
+                media_resolution: None,
+                enabled: true,
+            },
+            CustomModel {
+                id: "gemma-4-26b".to_owned(),
+                display_name: "Gemma 4 26B (via Gemini API)".to_owned(),
+                base_provider: "gemini".to_owned(),
+                model_id: "gemma-4-26b-a4b-it".to_owned(),
+                temperature: None,
+                media_resolution: None,
+                enabled: true,
+            },
+        ];
         Self {
             active_provider: "gemini".to_owned(),
             providers,
+            custom_models,
+            active_model_id: Some("gemini-3.7-flash".to_owned()),
         }
+    }
+}
+
+impl AiConfig {
+    /// Returns the active custom model, if any.
+    pub fn active_custom_model(&self) -> Option<&CustomModel> {
+        let id = self.active_model_id.as_deref()?;
+        self.custom_models
+            .iter()
+            .find(|m| m.id == id && m.enabled)
+            .or_else(|| self.custom_models.iter().find(|m| m.id == id))
+    }
+
+    /// Resolves the model string that should be sent to the provider.
+    /// Prefers the active custom model; falls back to the legacy provider effective_model for
+    /// configs that predate custom_models.
+    pub fn resolved_model(&self) -> String {
+        if let Some(m) = self.active_custom_model() {
+            return m.model_id.clone();
+        }
+        if let Some(p) = self.providers.get(&self.active_provider) {
+            return p.effective_model().to_owned();
+        }
+        "gemini-3.7-flash".to_owned()
+    }
+
+    /// Base provider that should handle the resolved model (e.g. "gemini" for both gemini-* and gemma-* via Gemini API).
+    pub fn resolved_base_provider(&self) -> String {
+        if let Some(m) = self.active_custom_model() {
+            return m.base_provider.clone();
+        }
+        self.active_provider.clone()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomModel {
+    pub id: String,
+    pub display_name: String,
+    pub base_provider: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub media_resolution: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl CustomModel {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("model id is empty".into());
+        }
+        if self.display_name.trim().is_empty() {
+            return Err("display name is empty".into());
+        }
+        if self.model_id.trim().is_empty() {
+            return Err("model_id is empty".into());
+        }
+        if self.base_provider.trim().is_empty() {
+            return Err("base_provider is empty".into());
+        }
+        if let Some(t) = self.temperature {
+            if !(0.0..=2.0).contains(&t) {
+                return Err("temperature must be 0.0-2.0".into());
+            }
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub keys: Vec<ApiKeyEntry>,
-    /// Fast model used when `use_fast_model` is true.
+    /// Fast model used when `use_fast_model` is true. Kept for migration from pre-custom-model configs.
     #[serde(default = "default_model")]
     pub model: String,
-    /// Pro model used when `use_fast_model` is false.
+    /// Pro model used when `use_fast_model` is false. Kept for migration.
     #[serde(default = "default_model_pro")]
     pub model_pro: String,
-    /// Toggle between fast and pro model.
+    /// Toggle between fast and pro model. Kept for migration.
     #[serde(default = "default_true")]
     pub use_fast_model: bool,
     /// Generation temperature (0.0 - 1.0). None = provider default.
@@ -215,7 +335,7 @@ impl Default for ProviderConfig {
 }
 
 impl ProviderConfig {
-    /// Model selected by the fast/pro toggle.
+    /// Model selected by the fast/pro toggle (legacy).
     pub fn effective_model(&self) -> &str {
         if self.use_fast_model {
             &self.model
@@ -242,6 +362,7 @@ pub struct ApiKeyEntry {
 
 impl AppConfig {
     /// Normalizes values into valid ranges; returns a list of issues found.
+    /// Also migrates legacy `model`/`model_pro` into `custom_models` when needed.
     pub fn normalize(&mut self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -277,8 +398,127 @@ impl AppConfig {
                 }
             }
         }
+
+        // Migrate legacy fast/pro into custom_models if none exist yet (v2 -> v2.1)
+        if self.ai.custom_models.is_empty() {
+            if let Some(p) = self.ai.providers.get(&self.ai.active_provider) {
+                let base = self.ai.active_provider.clone();
+                let mut migrated = Vec::new();
+                if !p.model.trim().is_empty() {
+                    migrated.push(CustomModel {
+                        id: slugify(&p.model),
+                        display_name: format!("{} (migrated)", p.model),
+                        base_provider: base.clone(),
+                        model_id: p.model.clone(),
+                        temperature: p.temperature,
+                        media_resolution: p.media_resolution.clone(),
+                        enabled: true,
+                    });
+                }
+                if !p.model_pro.trim().is_empty() && p.model_pro != p.model {
+                    migrated.push(CustomModel {
+                        id: slugify(&p.model_pro),
+                        display_name: format!("{} (migrated)", p.model_pro),
+                        base_provider: base.clone(),
+                        model_id: p.model_pro.clone(),
+                        temperature: p.temperature,
+                        media_resolution: p.media_resolution.clone(),
+                        enabled: true,
+                    });
+                }
+                if !migrated.is_empty() {
+                    let active_legacy = p.effective_model().to_owned();
+                    self.ai.custom_models = migrated;
+                    self.ai.active_model_id = Some(slugify(&active_legacy));
+                    issues.push("migrated legacy model/model_pro into custom_models".into());
+                }
+            }
+        }
+        // Fallback to defaults if still empty (e.g. fresh install after prune)
+        if self.ai.custom_models.is_empty() {
+            let def = AiConfig::default();
+            self.ai.custom_models = def.custom_models;
+            self.ai.active_model_id = def.active_model_id;
+            issues.push("custom_models was empty, restored defaults".into());
+        }
+        // Validate custom models
+        let mut seen = std::collections::HashSet::new();
+        let mut valid_models = Vec::new();
+        for mut m in self.ai.custom_models.drain(..) {
+            if m.id.trim().is_empty() {
+                m.id = slugify(&m.model_id);
+                issues.push(format!(
+                    "custom model '{}' had empty id, set to '{}'",
+                    m.display_name, m.id
+                ));
+            }
+            if !seen.insert(m.id.clone()) {
+                issues.push(format!("duplicate custom model id '{}', skipping", m.id));
+                continue;
+            }
+            if let Err(e) = m.validate() {
+                issues.push(format!("custom model '{}' invalid: {e}", m.id));
+                continue;
+            }
+            // Normalize base_provider to lower
+            m.base_provider = m.base_provider.to_lowercase();
+            if !self.ai.providers.contains_key(&m.base_provider) {
+                // Auto-create stub provider entry if user typed a new base
+                self.ai.providers.insert(
+                    m.base_provider.clone(),
+                    ProviderConfig {
+                        keys: Vec::new(),
+                        ..Default::default()
+                    },
+                );
+                issues.push(format!(
+                    "created stub provider '{}' for custom model '{}'",
+                    m.base_provider, m.id
+                ));
+            }
+            valid_models.push(m);
+        }
+        self.ai.custom_models = valid_models;
+        if self.ai.custom_models.is_empty() {
+            let def = AiConfig::default();
+            self.ai.custom_models = def.custom_models;
+            self.ai.active_model_id = def.active_model_id;
+            issues.push("all custom models invalid, restored defaults".into());
+        }
+        // Ensure active_model_id points to an existing enabled model
+        let active_ok = self
+            .ai
+            .active_model_id
+            .as_deref()
+            .map(|id| self.ai.custom_models.iter().any(|m| m.id == id))
+            .unwrap_or(false);
+        if !active_ok {
+            if let Some(first) = self
+                .ai
+                .custom_models
+                .iter()
+                .find(|m| m.enabled)
+                .or(self.ai.custom_models.first())
+            {
+                let new_id = first.id.clone();
+                self.ai.active_model_id = Some(new_id.clone());
+                issues.push(format!(
+                    "active_model_id missing/invalid, set to '{new_id}'"
+                ));
+            }
+        }
+
         issues
     }
+}
+
+fn slugify(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -296,15 +536,22 @@ mod tests {
         assert_eq!(cfg.processing.chunk_size_secs, 600);
         assert_eq!(cfg.processing.chunk_size_minutes(), 10);
         assert_eq!(cfg.ai.active_provider, "gemini");
-        let p = &cfg.ai.providers["gemini"];
-        assert_eq!(p.effective_model(), "gemini-2.5-flash");
+        // New extensible model system defaults to gemini-3.7-flash
+        assert_eq!(cfg.ai.resolved_model(), "gemini-3.7-flash");
+        assert_eq!(cfg.ai.custom_models.len(), 4);
         assert!(!cfg.cookies.use_cookies);
     }
 
     #[test]
     fn test_old_config_loads_with_defaults() {
         let old = r#"{"version":2,"language":"es","output_dir":null,"ai":{"active_provider":"gemini","providers":{"gemini":{"keys":[],"model":"gemini-2.5-flash"}}}}"#;
-        let cfg: AppConfig = serde_json::from_str(old).unwrap();
+        let mut cfg: AppConfig = serde_json::from_str(old).unwrap();
+        // Before normalize, custom_models is empty (old file); after normalize it migrates.
+        assert!(cfg.ai.custom_models.is_empty());
+        let issues = cfg.normalize();
+        assert!(issues.iter().any(|s| s.contains("migrated")));
+        assert_eq!(cfg.ai.custom_models.len(), 2);
+        assert_eq!(cfg.ai.resolved_model(), "gemini-2.5-flash");
         assert_eq!(cfg.language, "es");
         assert_eq!(cfg.processing.chunk_size_secs, 600);
         assert_eq!(cfg.export.naming_template, "short_%Y%m%d_%H%M%S");
@@ -367,5 +614,45 @@ mod tests {
         };
         let enabled: Vec<_> = p.enabled_keys().map(|k| k.name.as_str()).collect();
         assert_eq!(enabled, vec!["a"]);
+    }
+
+    #[test]
+    fn test_custom_model_gemma_on_gemini() {
+        let mut cfg = AppConfig::default();
+        // User creates a custom model "gemma-3.6" on top of gemini provider
+        let custom = CustomModel {
+            id: "my-gemma".into(),
+            display_name: "Gemma 3 27B custom".into(),
+            base_provider: "gemini".into(),
+            model_id: "gemma-3-27b-it".into(),
+            temperature: Some(0.7),
+            media_resolution: None,
+            enabled: true,
+        };
+        assert!(custom.validate().is_ok());
+        cfg.ai.custom_models.push(custom);
+        cfg.ai.active_model_id = Some("my-gemma".into());
+        assert_eq!(cfg.ai.resolved_model(), "gemma-3-27b-it");
+        assert_eq!(cfg.ai.resolved_base_provider(), "gemini");
+        // Also test gemma-4 via gemini
+        let gemma4 = CustomModel {
+            id: "gemma4".into(),
+            display_name: "Gemma 4 26B".into(),
+            base_provider: "gemini".into(),
+            model_id: "gemma-4-26b-a4b-it".into(),
+            temperature: None,
+            media_resolution: None,
+            enabled: true,
+        };
+        assert!(gemma4.validate().is_ok());
+    }
+
+    #[test]
+    fn test_resolved_model_fallback() {
+        let mut cfg = AppConfig::default();
+        cfg.ai.active_model_id = Some("nonexistent".into());
+        let issues = cfg.normalize();
+        assert!(issues.iter().any(|s| s.contains("active_model_id")));
+        assert!(cfg.ai.active_custom_model().is_some());
     }
 }

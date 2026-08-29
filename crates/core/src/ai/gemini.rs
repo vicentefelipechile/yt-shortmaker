@@ -66,15 +66,29 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     pub fn new(cfg: &ProviderConfig) -> Self {
+        Self::new_with_model(
+            cfg,
+            cfg.effective_model().to_owned(),
+            cfg.temperature,
+            cfg.media_resolution.clone(),
+        )
+    }
+
+    pub fn new_with_model(
+        cfg: &ProviderConfig,
+        model: String,
+        temperature: Option<f32>,
+        media_resolution: Option<String>,
+    ) -> Self {
         let keys = cfg
             .enabled_keys()
             .map(|k| (k.name.clone(), k.value.clone()))
             .collect();
         Self {
             keys,
-            model: cfg.effective_model().to_owned(),
-            temperature: cfg.temperature,
-            media_resolution: cfg.media_resolution.clone(),
+            model,
+            temperature,
+            media_resolution,
             disabled: Mutex::new(std::collections::HashSet::new()),
             cursor: AtomicUsize::new(0),
         }
