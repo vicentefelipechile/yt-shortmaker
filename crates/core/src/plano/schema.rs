@@ -1,5 +1,5 @@
 // =================================================================================================
-// plano::schema — Plano object schema (ported from src/exporter.rs:31)
+// plano::schema — Plano object schema
 // =================================================================================================
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,5 @@
 // =================================================================================================
-// plano::compiler — FFmpeg filter compiler (ported from src/exporter.rs:397)
+// plano::compiler — FFmpeg filter compiler
 // =================================================================================================
 
 use std::collections::HashMap;
