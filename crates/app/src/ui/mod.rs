@@ -8,6 +8,7 @@ use eframe::egui;
 
 use crate::state::{AppState, NewProjectStep, Route};
 use yt_shortmaker_core::media::ytdlp;
+use yt_shortmaker_core::plano::schema::{create_default_plano, PlanoObject};
 
 // -------------------------------------------------------------------------------------------------
 // Main
@@ -38,6 +39,7 @@ fn show_new_project(ui: &mut egui::Ui, state: &mut AppState) {
             ("1 Ingest", NewProjectStep::Ingest),
             ("2 Analyze", NewProjectStep::Analyze),
             ("3 Review", NewProjectStep::Review),
+            ("4 Export", NewProjectStep::Export),
         ] {
             let selected = state.new_project_step == step;
             if ui.selectable_label(selected, label).clicked() {
@@ -51,6 +53,7 @@ fn show_new_project(ui: &mut egui::Ui, state: &mut AppState) {
         NewProjectStep::Ingest => show_ingest(ui, state),
         NewProjectStep::Analyze => show_analyze(ui, state),
         NewProjectStep::Review => show_review(ui, state),
+        NewProjectStep::Export => show_export(ui, state),
     }
 }
 
@@ -92,7 +95,6 @@ fn show_analyze(ui: &mut egui::Ui, state: &mut AppState) {
             state.analyzing = true;
             state.progress = 0.3;
             state.log.push("Downloading low-res...".into());
-            // Mock: generate sample moments
             state.moments = vec![
                 yt_shortmaker_core::types::VideoMoment {
                     start_time: "00:00:05".into(),
@@ -157,21 +159,136 @@ fn show_review(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
-    if ui.button("Add moment").clicked() {
-        state.moments.push(yt_shortmaker_core::types::VideoMoment {
-            start_time: "00:00:00".into(),
-            end_time: "00:00:10".into(),
-            category: "other".into(),
-            description: "New moment".into(),
-            dialogue: vec![],
+    ui.horizontal(|ui| {
+        if ui.button("Add moment").clicked() {
+            state.moments.push(yt_shortmaker_core::types::VideoMoment {
+                start_time: "00:00:00".into(),
+                end_time: "00:00:10".into(),
+                category: "other".into(),
+                description: "New moment".into(),
+                dialogue: vec![],
+            });
+        }
+        if !state.moments.is_empty() && ui.button("Continue to Export").clicked() {
+            state.new_project_step = NewProjectStep::Export;
+        }
+    });
+}
+
+fn show_export(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading("Plano Editor & Export");
+    ui.separator();
+
+    if state.plano.is_empty() {
+        state.plano = create_default_plano();
+    }
+
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label("Layers");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut to_remove: Option<usize> = None;
+                let mut to_move_up: Option<usize> = None;
+                let mut to_move_down: Option<usize> = None;
+                for (idx, obj) in state.plano.iter().enumerate() {
+                    let label = match obj {
+                        PlanoObject::Clip { .. } => format!("{idx}: Clip"),
+                        PlanoObject::Shader { .. } => format!("{idx}: Shader"),
+                        PlanoObject::Image { path, .. } => format!("{idx}: Image {path}"),
+                        PlanoObject::Video { path, .. } => format!("{idx}: Video {path}"),
+                    };
+                    let selected = state.selected_layer == Some(idx);
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, label).clicked() {
+                            state.selected_layer = Some(idx);
+                        }
+                        if ui.small_button("↑").clicked() {
+                            to_move_up = Some(idx);
+                        }
+                        if ui.small_button("↓").clicked() {
+                            to_move_down = Some(idx);
+                        }
+                        if ui.small_button("✕").clicked() {
+                            to_remove = Some(idx);
+                        }
+                    });
+                }
+                if let Some(idx) = to_move_up {
+                    if idx > 0 {
+                        state.plano.swap(idx, idx - 1);
+                    }
+                }
+                if let Some(idx) = to_move_down {
+                    if idx + 1 < state.plano.len() {
+                        state.plano.swap(idx, idx + 1);
+                    }
+                }
+                if let Some(idx) = to_remove {
+                    state.plano.remove(idx);
+                    state.selected_layer = None;
+                }
+            });
+            if ui.button("Add Clip layer").clicked() {
+                let pos = yt_shortmaker_core::plano::schema::Position {
+                    x: yt_shortmaker_core::plano::schema::PositionValue::Pixels(0),
+                    y: yt_shortmaker_core::plano::schema::PositionValue::Keyword("center".into()),
+                    width: yt_shortmaker_core::plano::schema::SizeValue::Keyword("full".into()),
+                    height: yt_shortmaker_core::plano::schema::SizeValue::Pixels(800),
+                };
+                state.plano.push(PlanoObject::Clip {
+                    position: pos,
+                    crop: None,
+                    fit: yt_shortmaker_core::plano::schema::Fit::Cover,
+                    comment: None,
+                });
+            }
         });
+
+        ui.separator();
+
+        ui.vertical(|ui| {
+            ui.label("Inspector");
+            if let Some(idx) = state.selected_layer {
+                if let Some(obj) = state.plano.get(idx) {
+                    ui.label(format!("Selected: {idx}"));
+                    ui.label(format!("{obj:?}"));
+                }
+            } else {
+                ui.label("Select a layer");
+            }
+            ui.separator();
+            ui.label("Preview");
+            let preview = yt_shortmaker_core::plano::preview::preview_info(&state.plano);
+            ui.label(preview);
+            ui.label("1080x1920 • 9:16 • embedded preview placeholder");
+        });
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Queue:");
+        ui.label(format!("{} clips", state.moments.len()));
+        if ui.button("Start Export").clicked() {
+            state.export_progress = Some(0.0);
+            state.status_msg = Some("Export started (mock)".into());
+        }
+        if let Some(p) = state.export_progress {
+            ui.add(egui::ProgressBar::new(p));
+        }
+    });
+    if let Some(msg) = &state.status_msg {
+        ui.label(msg);
     }
 }
 
-fn show_export_standalone(ui: &mut egui::Ui, _state: &mut AppState) {
+fn show_export_standalone(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Export Standalone");
     ui.separator();
     ui.label("Select clips and a plano to export without AI.");
+    if state.plano.is_empty() {
+        state.plano = create_default_plano();
+    }
+    show_export(ui, state);
 }
 
 fn show_settings(ui: &mut egui::Ui, state: &mut AppState) {

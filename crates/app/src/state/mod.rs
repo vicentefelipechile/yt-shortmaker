@@ -3,6 +3,7 @@
 // =================================================================================================
 
 use yt_shortmaker_core::config::AppConfig;
+use yt_shortmaker_core::plano::schema::Plano;
 use yt_shortmaker_core::types::VideoMoment;
 
 // -------------------------------------------------------------------------------------------------
@@ -23,6 +24,7 @@ pub enum NewProjectStep {
     Ingest,
     Analyze,
     Review,
+    Export,
 }
 
 #[derive(Debug)]
@@ -37,6 +39,9 @@ pub struct AppState {
     pub progress: f32,
     pub log: Vec<String>,
     pub moments: Vec<VideoMoment>,
+    pub plano: Plano,
+    pub selected_layer: Option<usize>,
+    pub export_progress: Option<f32>,
     pub status_msg: Option<String>,
 }
 
@@ -53,6 +58,9 @@ impl AppState {
             progress: 0.0,
             log: Vec::new(),
             moments: Vec::new(),
+            plano: Vec::new(),
+            selected_layer: None,
+            export_progress: None,
             status_msg: None,
         }
     }
