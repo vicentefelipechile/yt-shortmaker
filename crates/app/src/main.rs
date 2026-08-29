@@ -37,14 +37,13 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_save(t!("save").to_string().into());
     app.set_tr_analyze(t!("new_project_start_analyze").to_string().into());
     app.set_tr_add_moment(t!("status_moment_added").to_string().into());
-    app.set_tr_browse(t!("export_select_folders").to_string().into());
+    app.set_tr_browse(t!("browse").to_string().into());
     app.set_tr_output_dir(t!("desc_output_dir").to_string().into());
     app.set_tr_language(t!("language").to_string().into());
-    app.set_tr_key_name(t!("keys_add_title").to_string().into());
-    app.set_tr_key_value(t!("keys_add_help").to_string().into());
+    app.set_tr_key_name(t!("field_name").to_string().into());
+    app.set_tr_key_value(t!("field_key").to_string().into());
     app.set_tr_add(t!("save").to_string().into());
     app.set_tr_delete(t!("cancel").to_string().into());
-    app.set_tr_keys_hint(t!("keys_help").to_string().into());
 }
 
 fn refresh_keys_list(app: &MainWindow, config: &yt_shortmaker_core::config::AppConfig) {
