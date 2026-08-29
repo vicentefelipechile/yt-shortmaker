@@ -11,153 +11,71 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows x64 (with MSI)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: yt-shortmaker.exe
-            asset_name: yt-shortmaker-windows-amd64.exe
+            asset_name: yt-shortmaker-app-windows-amd64.exe
+            binary: yt-shortmaker-app
             use_cross: false
             use_wix: true
             is_primary: true
-          
-          # Windows x86 (32-bit)
-          - os: windows-latest
-            target: i686-pc-windows-msvc
-            artifact_name: yt-shortmaker.exe
-            asset_name: yt-shortmaker-windows-i386.exe
-            use_cross: false
-            use_wix: false
-
-          # Windows ARM64
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: yt-shortmaker.exe
-            asset_name: yt-shortmaker-windows-arm64.exe
-            use_cross: false
-            use_wix: false
-
-          # Linux x64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: yt-shortmaker
-            asset_name: yt-shortmaker-linux-amd64
-            use_cross: false 
+            asset_name: yt-shortmaker-app-linux-amd64
+            binary: yt-shortmaker-app
+            use_cross: false
             use_wix: false
             is_primary: true
-
-          # Linux ARM64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact_name: yt-shortmaker
-            asset_name: yt-shortmaker-linux-arm64
+            asset_name: yt-shortmaker-app-linux-arm64
+            binary: yt-shortmaker-app
             use_cross: true
             use_wix: false
-
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Install Cross
         if: matrix.use_cross
-        run: cargo install cross
-
+        run: cargo install cross --locked
       - name: Install cargo-wix
         if: matrix.use_wix
-        run: cargo install cargo-wix
-
-      # Linux dependencies
-      - name: Install Linux Dependencies (Host)
+        run: cargo install cargo-wix --locked
+      - name: Install Linux Dependencies
         if: runner.os == 'Linux' && !matrix.use_cross
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libx11-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev
-
       - name: Build
         shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" == "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }} -p yt-shortmaker-app -p yt-shortmaker-cli
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --target ${{ matrix.target }} -p yt-shortmaker-app -p yt-shortmaker-cli
           fi
-
-      - name: Build MSI (Windows)
+      - name: Build MSI
         if: matrix.use_wix
-        # cargo wix build needs the target dir
-        # By default cargo wix tries to build again. --no-build uses existing artifacts if in correct place.
-        # However, standard cargo build puts in target/release or target/x86_64-pc-windows-msvc/release.
-        # cargo wix expects them in target/x86_64-pc-windows-msvc/release/
-        # Let's ensure we just run cargo wix normally as the build step for wix target? No, we want the exe too.
-        # Simplest: Build normally as above. Then run cargo wix --no-build only if we can trust it finds the binary.
-        # Safest: Let cargo wix do the build for us? But we want consistent build flags.
-        # Check: cargo wix --no-build --target ... 
         run: cargo wix --no-build --target ${{ matrix.target }} --nocapture
-
-      - name: Rename and Upload Binary
+      - name: Prepare Assets
         shell: bash
         run: |
-          # Rename source artifact to desired asset name
-          # Need to find source. For cross/target-specific builds: target/${{ matrix.target }}/release/
-          # For plain cargo build on host: target/release/ OR target/${{ matrix.target }}/release/ depending on config.
-          # dtolnay action usually sets up cargo to match, but explicit --target in build command forces target dir.
           DATA_DIR="target/${{ matrix.target }}/release"
-          
-          if [ -d "$DATA_DIR" ]; then
-             cd "$DATA_DIR"
-             if [ -f "${{ matrix.artifact_name }}" ]; then
-                # Copy to asset name (specific architecture name)
-                cp "${{ matrix.artifact_name }}" "../../../${{ matrix.asset_name }}"
-                
-                # If primary target, also copy to generic name
-                if [ "${{ matrix.is_primary }}" == "true" ]; then
-                   cp "${{ matrix.artifact_name }}" "../../../${{ matrix.artifact_name }}"
-                fi
-             fi
-             cd -
-          else
-             echo "Directory $DATA_DIR not found"
-             exit 1
+          cp "$DATA_DIR/${{ matrix.binary }}.exe" "./${{ matrix.asset_name }}" 2>/dev/null || cp "$DATA_DIR/${{ matrix.binary }}" "./${{ matrix.asset_name }}"
+          if [ "${{ matrix.is_primary }}" == "true" ]; then
+            cp "./${{ matrix.asset_name }}" "./${{ matrix.binary }}${{ endsWith(matrix.target, 'windows-msvc') && '.exe' || '' }}"
           fi
-
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           files: |
             ${{ matrix.asset_name }}
-            ${{ matrix.artifact_name }}
             target/**/*.msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate Release Notes
-        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
-        shell: bash
-        run: |
-          cat <<EOF > RELEASE_NOTES.md
-          ## System Compatibility
-          
-          | Filename | System | Description |
-          | :--- | :--- | :--- |
-          | \`yt-shortmaker-windows-amd64.exe\` | **Windows 10/11** (64-bit) | Standard version for most modern PCs. |
-          | \`yt-shortmaker-windows-amd64.msi\` | **Windows Installer** | Installer for standard Windows (adds to PATH). |
-          | \`yt-shortmaker-windows-i386.exe\` | **Windows 7/8/10** (32-bit) | For older or low-end computers. |
-          | \`yt-shortmaker-windows-arm64.exe\` | **Windows ARM64** | For devices like Surface Pro X, Lenovo ThinkPad X13s (Snapdragon). |
-          | \`yt-shortmaker-linux-amd64\` | **Linux** (64-bit) | Standard for servers and desktops (Ubuntu, Debian, Fedora, etc). |
-          | \`yt-shortmaker-linux-arm64\` | **Linux ARM64** | For Raspberry Pi 4/5, AWS Graviton, or other ARM servers. |
-          EOF
-
-      - name: Publish Release Notes
-        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ github.ref_name }}
-          body_path: RELEASE_NOTES.md
-          generate_release_notes: true
