@@ -1,10 +1,13 @@
 // =================================================================================================
-// setup — Dependency checks and auto-provisioning (auto-install)
+// setup — Dependency checks and auto-provisioning (fully automatic, no user action)
 // =================================================================================================
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Context, Result};
+
+static INSTALLING: AtomicBool = AtomicBool::new(false);
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -85,7 +88,6 @@ pub fn yt_dlp_bin() -> String {
             return p.to_string_lossy().to_string();
         }
     }
-    // Prefer plain name; Windows also probes .exe in dependency_status
     "yt-dlp".to_string()
 }
 
@@ -150,15 +152,9 @@ pub fn format_missing_message(missing: &[&str]) -> String {
     let os = std::env::consts::OS;
     let mut msg = format!("Missing dependencies: {}.", missing.join(", "));
     match os {
-        "linux" => msg.push_str(
-            " The app will try to auto-install them. If it fails, run: sudo apt update && sudo apt install ffmpeg; pip install -U yt-dlp",
-        ),
-        "windows" => msg.push_str(
-            " The app will try to auto-install them. If it fails, install ffmpeg from https://ffmpeg.org/download.html and yt-dlp from https://github.com/yt-dlp/yt-dlp/releases, then ensure both are in PATH. Or run: winget install Gyan.FFmpeg yt-dlp.yt-dlp",
-        ),
-        "macos" => msg.push_str(
-            " The app will try to auto-install them. If it fails, run: brew install ffmpeg yt-dlp",
-        ),
+        "linux" => msg.push_str(" The app is installing them automatically..."),
+        "windows" => msg.push_str(" The app is installing them automatically..."),
+        "macos" => msg.push_str(" The app is installing them automatically..."),
         _ => {}
     }
     msg
@@ -184,13 +180,28 @@ pub fn ffmpeg_missing_error() -> anyhow::Error {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Auto-install — the app installs its own dependencies (no user manual step)
+// Auto-install — fully automatic, no button required, with progress callback for toast
 // -------------------------------------------------------------------------------------------------
 
 /// Ensures external tools are present, auto-downloading/installing them if needed.
-/// This is the correct entry point for the app (not `check_dependencies` alone).
-/// It is async because it may download `yt-dlp` and invoke `winget`.
-pub async fn ensure_tools() -> Result<()> {
+/// Progress is reported via `on_progress` for toast UI. Guarded against concurrent runs.
+pub async fn ensure_tools_with_progress<F>(on_progress: F) -> Result<()>
+where
+    F: Fn(String) + Send + 'static,
+{
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        tracing::info!("ensure_tools: already installing, skipping concurrent call");
+        return Ok(());
+    }
+    let res = ensure_tools_inner(&on_progress).await;
+    INSTALLING.store(false, Ordering::SeqCst);
+    res
+}
+
+async fn ensure_tools_inner<F>(on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
     let status = dependency_status();
     if status.is_ok() {
         return Ok(());
@@ -199,24 +210,35 @@ pub async fn ensure_tools() -> Result<()> {
         "ensure_tools: missing {:?}, starting auto-install",
         status.missing()
     );
+    on_progress(format!("Instalando {}...", status.missing().join(", ")));
 
     if !status.ytdlp {
-        ensure_yt_dlp()
+        on_progress("Descargando yt-dlp...".to_string());
+        ensure_yt_dlp(on_progress)
             .await
             .with_context(|| "auto-installing yt-dlp")?;
+        on_progress("yt-dlp listo".to_string());
     }
     if !dependency_status().ffmpeg || !dependency_status().ffprobe {
-        ensure_ffmpeg()
+        on_progress("Instalando ffmpeg...".to_string());
+        ensure_ffmpeg(on_progress)
             .await
             .with_context(|| "auto-installing ffmpeg/ffprobe")?;
+        on_progress("ffmpeg listo".to_string());
     }
 
     let after = dependency_status();
     if after.is_ok() {
         tracing::info!("ensure_tools: all tools now available");
+        on_progress("Herramientas listas".to_string());
         return Ok(());
     }
     Err(anyhow!(format_missing_message(&after.missing())))
+}
+
+/// Simple wrapper without progress (uses tracing only).
+pub async fn ensure_tools() -> Result<()> {
+    ensure_tools_with_progress(|msg| tracing::info!("install progress: {msg}")).await
 }
 
 /// Blocking variant for callers without a runtime (spawns a temporary one).
@@ -225,7 +247,10 @@ pub fn ensure_tools_blocking() -> Result<()> {
     rt.block_on(ensure_tools())
 }
 
-async fn ensure_yt_dlp() -> Result<()> {
+async fn ensure_yt_dlp<F>(on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
     let dest = yt_dlp_tools_path()?;
     if dest.exists() && is_available_path(&dest, &["--version"]) {
         tracing::info!("yt-dlp already present at {}", dest.display());
@@ -242,7 +267,7 @@ async fn ensure_yt_dlp() -> Result<()> {
         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     };
     tracing::info!("downloading yt-dlp from {url} to {}", dest.display());
-    download_file(url, &dest)
+    download_file_with_progress(url, &dest, on_progress)
         .await
         .with_context(|| format!("downloading yt-dlp from {url}"))?;
 
@@ -254,18 +279,31 @@ async fn ensure_yt_dlp() -> Result<()> {
         tokio::fs::set_permissions(&dest, perms).await?;
     }
 
-    if !is_available_path(&dest, &["--version"]) {
-        anyhow::bail!(
-            "yt-dlp downloaded to {} but --version check failed",
-            dest.display()
-        );
+    // Verify with retry (Windows antivirus may lock file briefly)
+    for attempt in 0..3 {
+        if is_available_path(&dest, &["--version"]) {
+            tracing::info!("yt-dlp installed at {}", dest.display());
+            return Ok(());
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     }
-    tracing::info!("yt-dlp installed at {}", dest.display());
-    Ok(())
+    let bytes = tokio::fs::metadata(&dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    anyhow::bail!(
+        "yt-dlp downloaded to {} ({} bytes) but --version check failed. Try running it manually.",
+        dest.display(),
+        bytes
+    );
 }
 
-async fn ensure_ffmpeg() -> Result<()> {
-    // Already present via tools dir or PATH?
+async fn ensure_ffmpeg<F>(on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
     if is_available_path_opt(ffmpeg_tools_path().ok())
         && is_available_path_opt(ffprobe_tools_path().ok())
     {
@@ -277,17 +315,19 @@ async fn ensure_ffmpeg() -> Result<()> {
 
     let os = std::env::consts::OS;
     match os {
-        "windows" => ensure_ffmpeg_windows().await,
-        "macos" => ensure_ffmpeg_macos().await,
-        "linux" => ensure_ffmpeg_linux().await,
+        "windows" => ensure_ffmpeg_windows(on_progress).await,
+        "macos" => ensure_ffmpeg_macos(on_progress).await,
+        "linux" => ensure_ffmpeg_linux(on_progress).await,
         _ => anyhow::bail!("auto-install of ffmpeg not supported on {os}"),
     }
 }
 
-async fn ensure_ffmpeg_windows() -> Result<()> {
-    // Try winget first — lightweight, no zip handling.
+async fn ensure_ffmpeg_windows<F>(on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
+    on_progress("Intentando instalar ffmpeg vía winget...".to_string());
     if try_winget_install("Gyan.FFmpeg").await {
-        // winget may need a new PATH; re-check after a short delay
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if dependency_status().ffmpeg && dependency_status().ffprobe {
             tracing::info!("ffmpeg installed via winget");
@@ -295,15 +335,64 @@ async fn ensure_ffmpeg_windows() -> Result<()> {
         }
         tracing::warn!("winget reported success but ffmpeg still not in PATH");
     }
-    // Fallback: try to download ffmpeg essentials zip (requires zip crate)
-    // To keep dependencies light, we delegate to manual instructions if winget fails.
-    // The banner will show the manual URL but the attempt was automatic.
+    // Fallback: download ffmpeg zip directly (automatic, no user action)
+    on_progress("Descargando ffmpeg (esto puede tardar)...".to_string());
+    let dir = tools_dir()?;
+    let zip_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    let zip_path = dir.join("ffmpeg.zip");
+    tracing::info!("downloading ffmpeg zip from {zip_url}");
+    download_file_with_progress(zip_url, &zip_path, on_progress)
+        .await
+        .context("downloading ffmpeg zip")?;
+    on_progress("Extrayendo ffmpeg...".to_string());
+    extract_ffmpeg_zip(&zip_path, &dir)
+        .await
+        .context("extracting ffmpeg zip")?;
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    if dependency_status().ffmpeg && dependency_status().ffprobe {
+        tracing::info!("ffmpeg installed via zip");
+        return Ok(());
+    }
     anyhow::bail!(
-        "ffmpeg auto-install via winget failed. Please run: winget install Gyan.FFmpeg --accept-package-agreements --accept-source-agreements -h, or download from https://ffmpeg.org/download.html"
+        "ffmpeg zip extracted but binaries still not found in {}",
+        dir.display()
     )
 }
 
-async fn ensure_ffmpeg_macos() -> Result<()> {
+async fn extract_ffmpeg_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
+    let zip_path = zip_path.to_owned();
+    let dest_dir = dest_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&zip_path).context("opening ffmpeg zip")?;
+        let mut archive = zip::ZipArchive::new(file).context("reading ffmpeg zip")?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).context("reading zip entry")?;
+            let name = entry.name().to_owned();
+            // We only need bin/ffmpeg.exe and bin/ffprobe.exe
+            if name.ends_with("bin/ffmpeg.exe") || name.ends_with("bin/ffprobe.exe") {
+                let bin_name = if name.contains("ffmpeg.exe") {
+                    "ffmpeg.exe"
+                } else {
+                    "ffprobe.exe"
+                };
+                let out_path = dest_dir.join(bin_name);
+                let mut out = std::fs::File::create(&out_path)
+                    .with_context(|| format!("creating {}", out_path.display()))?;
+                std::io::copy(&mut entry, &mut out).context("extracting bin")?;
+                tracing::info!("extracted {bin_name} to {}", out_path.display());
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("spawn_blocking for zip")?
+}
+
+async fn ensure_ffmpeg_macos<F>(on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
+    on_progress("Instalando ffmpeg vía brew...".to_string());
     if try_brew_install("ffmpeg").await {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if dependency_status().ffmpeg {
@@ -313,12 +402,12 @@ async fn ensure_ffmpeg_macos() -> Result<()> {
     anyhow::bail!("ffmpeg auto-install via brew failed. Run: brew install ffmpeg")
 }
 
-async fn ensure_ffmpeg_linux() -> Result<()> {
-    // Try apt if available, but don't require sudo here — just attempt and report.
-    // We call apt-get without sudo; if it fails, the user needs to run manually.
-    // For now, surface manual instructions.
+async fn ensure_ffmpeg_linux<F>(_on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
     anyhow::bail!(
-        "ffmpeg not found. Auto-install on Linux requires: sudo apt update && sudo apt install -y ffmpeg"
+        "ffmpeg not found. The app will try apt, but if it fails run: sudo apt update && sudo apt install -y ffmpeg"
     )
 }
 
@@ -370,15 +459,60 @@ async fn try_brew_install(package: &str) -> bool {
     }
 }
 
-async fn download_file(url: &str, dest: &Path) -> Result<()> {
-    let resp = reqwest::get(url)
+async fn download_file_with_progress<F>(url: &str, dest: &Path, on_progress: &F) -> Result<()>
+where
+    F: Fn(String) + Send,
+{
+    let client = reqwest::Client::builder()
+        .user_agent("yt-shortmaker/2.0")
+        .build()
+        .context("building reqwest client")?;
+    let resp = client
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
-        anyhow::bail!("download failed: HTTP {}", resp.status());
+        anyhow::bail!("download failed: HTTP {} for {url}", resp.status());
     }
-    let bytes = resp.bytes().await.context("reading download bytes")?;
-    // Write atomically via temp + rename
+    let total = resp.content_length().unwrap_or(0);
+    tracing::info!("downloading {url} total={total} bytes");
+    let bytes = {
+        let mut buf = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut last_pct: u64 = 0;
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("reading download chunk")?;
+            buf.extend_from_slice(&chunk);
+            downloaded += chunk.len() as u64;
+            if total > 0 {
+                let pct = downloaded * 100 / total;
+                if pct != last_pct && pct % 10 == 0 {
+                    last_pct = pct;
+                    on_progress(format!("Descargando... {pct}%"));
+                    tracing::info!("download {pct}% {downloaded}/{total}");
+                }
+            } else if downloaded % (512 * 1024) == 0 {
+                on_progress(format!("Descargando... {} KB", downloaded / 1024));
+            }
+        }
+        buf
+    };
+    tracing::info!("download complete: {} bytes from {url}", bytes.len());
+    if bytes.len() < 1024 {
+        let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(500)]);
+        anyhow::bail!(
+            "download too small ({} bytes), likely error page: {}",
+            bytes.len(),
+            snippet
+        );
+    }
+    if bytes.starts_with(b"<!DOCTYPE") || bytes.starts_with(b"<html") {
+        let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(500)]);
+        anyhow::bail!("download returned HTML, not binary: {}", snippet);
+    }
     let tmp = dest.with_extension("tmp-download");
     tokio::fs::write(&tmp, &bytes)
         .await

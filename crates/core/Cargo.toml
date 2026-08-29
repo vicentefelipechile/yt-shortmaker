@@ -14,7 +14,8 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 futures-util = "0.3"
 http-body-util = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.13", features = ["json", "multipart", "stream"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1.13"
 dirs = "6.0"
