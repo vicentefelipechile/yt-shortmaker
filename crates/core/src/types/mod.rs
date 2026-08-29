@@ -5,14 +5,6 @@
 use serde::{Deserialize, Serialize};
 
 // -------------------------------------------------------------------------------------------------
-// Constants
-// -------------------------------------------------------------------------------------------------
-
-pub const APP_VERSION: &str = "2.0.0-alpha.1";
-pub const APP_NAME: &str = "yt-shortmaker";
-pub const DEFAULT_CATEGORY_OTHER: &str = "Other";
-
-// -------------------------------------------------------------------------------------------------
 // Types
 // -------------------------------------------------------------------------------------------------
 
@@ -39,13 +31,6 @@ pub struct VideoMoment {
 pub struct VideoChunk {
     pub start_seconds: u64,
     pub file_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionState {
-    pub youtube_url: String,
-    pub moments: Vec<VideoMoment>,
-    pub temp_dir: String,
 }
 
 // -------------------------------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 // =================================================================================================
-// security — Encryption modes and helpers
+// security — OS keyring helpers (Keyring mode)
 // =================================================================================================
+// v1 Simple obfuscation and Password (aes-gcm+argon2) modes were removed in v2.
+// Only None (plain) and Keyring (OS credential store) remain. Use `keyring::*`.
 
 pub mod keyring;
-
-use zeroize::Zeroize;
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -14,24 +14,4 @@ use zeroize::Zeroize;
 pub enum SecurityMode {
     None,
     Keyring,
-    Password,
-}
-
-#[derive(Debug, Clone)]
-pub struct Secret(pub String);
-
-impl Drop for Secret {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-impl Secret {
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
 }

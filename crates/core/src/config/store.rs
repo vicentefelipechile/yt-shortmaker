@@ -28,7 +28,8 @@ pub fn load() -> Result<AppConfig> {
     }
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading config at {}", path.display()))?;
-    let cfg: AppConfig = serde_json::from_str(&raw).context("parsing config json")?;
+    let mut cfg: AppConfig = serde_json::from_str(&raw).context("parsing config json")?;
+    cfg.normalize();
     Ok(cfg)
 }
 
