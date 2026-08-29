@@ -176,6 +176,21 @@ component NavItem inherits Rectangle {
     }
 }
 
+struct KeyRow {
+    name: string,
+    enabled: bool,
+    index: int,
+}
+
+struct ModelRow {
+    id: string,
+    display_name: string,
+    model_id: string,
+    base: string,
+    enabled: bool,
+    active: bool,
+}
+
 // =========================================================================================================
 // Main Window
 // =========================================================================================================
@@ -192,6 +207,11 @@ export component MainWindow inherits Window {
     in-out property <string> url-input: "";
     in-out property <string> url-error: "";
     in-out property <string> video-title: "";
+    in-out property <string> video-id: "";
+    in-out property <string> video-duration: "";
+    in-out property <string> video-thumbnail: "";
+    in property <image> video-thumbnail-image;
+    in property <bool> video-has-info: false;
     in-out property <float> progress: 0.0;
     in-out property <string> status-msg: "";
     in-out property <string> core-version: "2.0.0";
@@ -207,6 +227,17 @@ export component MainWindow inherits Window {
     in-out property <string> model-fast-name: "gemini-2.5-flash";
     in-out property <string> model-pro-name: "gemini-2.5-pro";
     in-out property <string> new-key-value: "";
+    in property <string> models-list: "";
+    in-out property <string> new-model-display-name: "";
+    in-out property <string> new-model-id: "";
+    in-out property <string> new-model-base: "gemini";
+    in-out property <string> new-model-temp: "";
+    in property <[KeyRow]> keys-model: [];
+    in property <int> selected-key-index: -1;
+    in property <[ModelRow]> models-model: [];
+    in property <string> selected-model-id: "";
+    in property <bool> show-key-drawer: false;
+    in property <bool> show-model-drawer: false;
 
     in property <string> tr-navigate: "Navigate";
     in property <string> tr-home: "Home";
@@ -223,6 +254,12 @@ export component MainWindow inherits Window {
     in property <string> tr-analysis-settings: "Analysis settings are managed in Settings and AI / Keys.";
     in property <string> tr-url-label: "YouTube URL";
     in property <string> tr-fetch: "Fetch Info";
+    in property <string> tr-fetching: "Fetching video info...";
+    in property <string> tr-video-preview: "Video preview";
+    in property <string> tr-video-duration: "Duration";
+    in property <string> tr-video-id: "ID";
+    in property <string> tr-video-no-thumb: "No thumbnail";
+    in property <string> tr-video-found: "Video loaded";
     in property <string> tr-export-title: "Export Standalone";
     in property <string> tr-export-desc: "Select clips and a plano to export without AI.";
     in property <string> tr-keys-title: "AI / Keys";
@@ -246,6 +283,13 @@ export component MainWindow inherits Window {
     in property <string> tr-cookies-path: "Cookies file";
     in property <string> tr-naming-template: "Output naming template";
     in property <string> tr-model: "Analysis model";
+    in property <string> tr-model-display-name: "Display name";
+    in property <string> tr-model-id-label: "Model ID";
+    in property <string> tr-model-base: "Base provider";
+    in property <string> tr-add-model: "Add model";
+    in property <string> tr-select-model: "Select";
+    in property <string> tr-delete-model: "Delete";
+    in property <string> tr-models-title: "Available models";
     in property <string> tr-ai-description: "Choose the model used for video analysis. This setting is shared by every project.";
     in property <string> tr-ai-section: "AI PROVIDER";
     in property <string> tr-keys-section: "API KEYS";
@@ -266,6 +310,8 @@ export component MainWindow inherits Window {
     in property <string> home-recent-list: "";
     in property <string> settings-status: "";
     in property <string> keys-status: "";
+    in property <string> models-status: "";
+    in property <string> toast-msg: "";
 
     callback navigate(string);
     callback fetch-info();
@@ -279,6 +325,18 @@ export component MainWindow inherits Window {
     callback toggle-key();
     callback test-connection();
     callback check-deps();
+    callback add-model();
+    callback select-model();
+    callback delete-model();
+    callback select-key(int);
+    callback delete-key-at(int);
+    callback toggle-key-at(int);
+    callback open-key-drawer();
+    callback close-key-drawer();
+    callback open-model-drawer();
+    callback close-model-drawer();
+    callback select-model-id(string);
+    callback delete-model-id(string);
 
     HorizontalLayout {
         Rectangle {
@@ -314,13 +372,15 @@ export component MainWindow inherits Window {
         Rectangle {
             horizontal-stretch: 1;
             background: #121214;
-            ScrollView {
-                VerticalLayout {
-                    padding: 24px;
-                    spacing: 16px;
-                    alignment: start;
+            VerticalLayout {
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 24px;
+                        spacing: 16px;
+                        alignment: start;
 
-                    if route == "home": VerticalLayout {
+                        if route == "home": VerticalLayout {
                         alignment: start;
                         spacing: 10px;
                         if !root.deps-ok: Rectangle {
@@ -331,12 +391,7 @@ export component MainWindow inherits Window {
                                 padding: 12px;
                                 spacing: 8px;
                                 Text { text: root.tr-deps-missing; color: #fca5a5; font-size: 12px; font-weight: 700; }
-                                if root.deps-installing: Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
-                                if !root.deps-installing: VerticalLayout {
-                                    spacing: 8px;
-                                    Text { text: root.deps-error; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
-                                    SquareButton { label: root.tr-deps-install; width: 160px; clicked => { root.check-deps(); } }
-                                }
+                                Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
                             }
                         }
                         Text { text: root.tr-home-recent; color: #ffffff; font-size: 17px; font-weight: 700; }
@@ -379,12 +434,7 @@ export component MainWindow inherits Window {
                                 padding: 12px;
                                 spacing: 8px;
                                 Text { text: root.tr-deps-missing; color: #fca5a5; font-size: 12px; font-weight: 700; }
-                                if root.deps-installing: Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
-                                if !root.deps-installing: VerticalLayout {
-                                    spacing: 8px;
-                                    Text { text: root.deps-error; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
-                                    SquareButton { label: root.tr-deps-install; width: 160px; clicked => { root.check-deps(); } }
-                                }
+                                Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
                             }
                         }
                         Rectangle { height: 1px; background: #27272a; }
@@ -398,15 +448,84 @@ export component MainWindow inherits Window {
                             }
                             SquareButton { label: root.tr-fetch; primary: true; width: 110px; clicked => { root.fetch-info(); } }
                         }
-                        if url-error != "": Text { text: url-error; color: #f87171; font-size: 12px; wrap: word-wrap; }
-                        if video-title != "": Text { text: video-title; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
+                        if url-error != "": Rectangle {
+                            background: #2a1515;
+                            border-width: 1px;
+                            border-color: #7f1d1d;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                Text { text: url-error; color: #fca5a5; font-size: 12px; wrap: word-wrap; }
+                            }
+                        }
+                        if root.video-has-info: Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                Text { text: root.tr-video-preview; color: #818cf8; font-size: 11px; font-weight: 700; }
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    Rectangle {
+                                        width: 160px;
+                                        height: 90px;
+                                        background: #252629;
+                                        border-width: 1px;
+                                        border-color: #3a3c42;
+                                        Image {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            source: root.video-thumbnail-image;
+                                            image-fit: cover;
+                                        }
+                                        if root.video-thumbnail-image.width == 0: Text {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text: root.tr-video-no-thumb;
+                                            color: #858b96;
+                                            font-size: 11px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        horizontal-stretch: 1;
+                                        Text { text: root.video-title; color: #ffffff; font-size: 13px; font-weight: 600; wrap: word-wrap; }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: root.tr-video-id + ":"; color: #71717a; font-size: 11px; }
+                                            Text { text: root.video-id; color: #a1a1aa; font-size: 11px; }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: root.tr-video-duration + ":"; color: #71717a; font-size: 11px; }
+                                            Text { text: root.video-duration; color: #a1a1aa; font-size: 11px; }
+                                        }
+                                        if root.video-thumbnail != "": Text { text: root.video-thumbnail; color: #6366f1; font-size: 9px; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+                        }
                         Rectangle { height: 1px; background: #27272a; }
                         Text { text: root.tr-analysis-step; color: #e4e4e7; font-size: 12px; font-weight: 600; }
                         Text { text: root.tr-analysis-settings; color: #9ca3af; font-size: 12px; }
                         HorizontalLayout {
                             spacing: 8px;
+                            alignment: start;
                             SquareButton { label: root.tr-analyze; primary: true; width: 140px; clicked => { root.start-analyze(); } }
-                            Text { text: status-msg; color: #c3c6cc; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        }
+                        if status-msg != "": Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                Text { text: status-msg; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
+                            }
                         }
                         Rectangle {
                             height: 4px;
@@ -491,35 +610,179 @@ export component MainWindow inherits Window {
 
                         Text { text: root.tr-ai-section; color: #818cf8; font-size: 11px; font-weight: 700; }
                         Text { text: root.tr-ai-description; color: #b9bdc5; font-size: 12px; wrap: word-wrap; }
-                        Text { text: root.tr-model; color: #e4e4e7; font-size: 12px; font-weight: 600; }
-                        HorizontalLayout {
-                            spacing: 4px;
-                            SquareChoice { label: root.model-fast-name; width: 170px; selected: root.use-fast-model; chosen => { root.use-fast-model = true; } }
-                            SquareChoice { label: root.model-pro-name; width: 170px; selected: !root.use-fast-model; chosen => { root.use-fast-model = false; } }
+                        Text { text: root.tr-models-title; color: #e4e4e7; font-size: 12px; font-weight: 600; }
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            height: 150px;
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 2px;
+                                    if root.models-model.length == 0: Text { text: root.tr-no-keys; color: #858b96; font-size: 11px; horizontal-alignment: center; }
+                                    for m in root.models-model: Rectangle {
+                                        height: 34px;
+                                        background: m.active ? #2a2a2e : transparent;
+                                        border-width: 1px;
+                                        border-color: m.active ? #6366f1 : #27272a;
+                                        TouchArea { clicked => { root.select-model-id(m.id); } }
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 6px;
+                                            spacing: 8px;
+                                            Text { text: m.active ? "●" : " "; color: #6366f1; font-size: 10px; width: 12px; vertical-alignment: center; }
+                                            VerticalLayout {
+                                                spacing: 1px;
+                                                vertical-stretch: 1;
+                                                alignment: center;
+                                                Text { text: m.display_name; color: #ffffff; font-size: 12px; font-weight: 500; }
+                                                Text { text: m.model_id + " (" + m.base + ")"; color: #a1a1aa; font-size: 10px; }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            SquareButton { label: root.tr-select-model; width: 70px; height: 24px; clicked => { root.select-model-id(m.id); } }
+                                            SquareButton { label: root.tr-delete-model; width: 60px; height: 24px; clicked => { root.delete-model-id(m.id); } }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        SquareButton { label: root.tr-save; width: 110px; clicked => { root.save-ai-settings(); } }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            SquareButton { label: root.tr-add-model; primary: true; width: 120px; clicked => { root.open-model-drawer(); } }
+                            Text { text: root.models-status; color: #86efac; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        }
 
                         Rectangle { height: 1px; background: #27272a; }
                         Text { text: root.tr-keys-section; color: #818cf8; font-size: 11px; font-weight: 700; }
-                        Text { text: root.tr-key-description; color: #b9bdc5; font-size: 12px; }
-                        Text { text: root.tr-key-value; color: #e4e4e7; font-size: 12px; font-weight: 600; }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            SquareInput { text <=> root.new-key-value; placeholder-text: "AIza..."; password: true; horizontal-stretch: 1; }
-                            SquareButton { label: root.tr-add; primary: true; width: 100px; clicked => { root.add-key(); } }
+                        Text { text: root.tr-key-description; color: #b9bdc5; font-size: 12px; wrap: word-wrap; }
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            height: 150px;
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 2px;
+                                    if root.keys-model.length == 0: Text { text: root.tr-no-keys; color: #858b96; font-size: 11px; horizontal-alignment: center; }
+                                    for k in root.keys-model: Rectangle {
+                                        height: 32px;
+                                        background: k.index == root.selected-key-index ? #2a2a2e : transparent;
+                                        border-width: 1px;
+                                        border-color: k.index == root.selected-key-index ? #6366f1 : #27272a;
+                                        TouchArea { clicked => { root.select-key(k.index); } }
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 6px;
+                                            spacing: 8px;
+                                            Text { text: k.name; color: #ffffff; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                            Text { text: k.enabled ? "[on]" : "[off]"; color: k.enabled ? #86efac : #f87171; font-size: 10px; vertical-alignment: center; }
+                                            SquareButton { label: "On/Off"; width: 60px; height: 24px; clicked => { root.toggle-key-at(k.index); } }
+                                            SquareButton { label: "Borrar"; width: 60px; height: 24px; clicked => { root.delete-key-at(k.index); } }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        Rectangle { height: 1px; background: #27272a; }
-                        Text { text: keys-list == "" ? root.tr-no-keys : keys-list; color: #d4d4d8; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
                             spacing: 8px;
-                            SquareButton { label: root.tr-toggle-key; width: 110px; clicked => { root.toggle-key(); } }
-                            SquareButton { label: root.tr-delete-key; width: 110px; clicked => { root.delete-key(); } }
+                            SquareButton { label: root.tr-add; primary: true; width: 120px; clicked => { root.open-key-drawer(); } }
                             SquareButton { label: root.tr-test-connection; width: 130px; clicked => { root.test-connection(); } }
+                            Text { text: root.keys-status; color: #c3c6cc; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
                         }
-                        Text { text: root.keys-status; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
+                    }
+                }
+            }
+                if root.toast-msg != "": Rectangle {
+                    height: 36px;
+                    background: #1e1e21;
+                    border-width: 1px;
+                    border-color: #3a3c42;
+                    Text {
+                        x: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: root.toast-msg;
+                        color: #e4e4e7;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
                     }
                 }
             }
         }
     }
+        // Lateral drawers — overlay + sliding panel (square, dark, no radius)
+        if root.show-key-drawer: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #000000;
+            opacity: 0.45;
+            TouchArea { clicked => { root.close-key-drawer(); } }
+        }
+        if root.show-key-drawer: Rectangle {
+            x: parent.width - 380px;
+            width: 380px;
+            height: parent.height;
+            background: #18181b;
+            border-width: 1px;
+            border-color: #27272a;
+            animate x { duration: 180ms; easing: ease-in-out; }
+            TouchArea { }
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text { text: "Añadir Clave API"; color: #ffffff; font-size: 14px; font-weight: 700; }
+                Text { text: root.tr-key-description; color: #b9bdc5; font-size: 12px; wrap: word-wrap; }
+                Text { text: root.tr-key-value; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+                SquareInput { text <=> root.new-key-value; placeholder-text: "AIza..."; password: true; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SquareButton { label: root.tr-add; primary: true; width: 110px; clicked => { root.add-key(); } }
+                    SquareButton { label: "Cancelar"; width: 110px; clicked => { root.close-key-drawer(); } }
+                }
+                Text { text: root.keys-status; color: #86efac; font-size: 11px; wrap: word-wrap; }
+            }
+        }
+        if root.show-model-drawer: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #000000;
+            opacity: 0.45;
+            TouchArea { clicked => { root.close-model-drawer(); } }
+        }
+        if root.show-model-drawer: Rectangle {
+            x: parent.width - 400px;
+            width: 400px;
+            height: parent.height;
+            background: #18181b;
+            border-width: 1px;
+            border-color: #27272a;
+            animate x { duration: 180ms; easing: ease-in-out; }
+            TouchArea { }
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text { text: "Añadir Modelo"; color: #ffffff; font-size: 14px; font-weight: 700; }
+                Text { text: root.tr-ai-description; color: #b9bdc5; font-size: 11px; wrap: word-wrap; }
+                Text { text: root.tr-model-display-name; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+                SquareInput { text <=> root.new-model-display-name; placeholder-text: "Gemini 3.7 Flash"; }
+                Text { text: root.tr-model-id-label; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+                SquareInput { text <=> root.new-model-id; placeholder-text: "gemini-3.7-flash"; }
+                Text { text: root.tr-model-base; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+                HorizontalLayout {
+                    spacing: 4px;
+                    SquareChoice { label: "gemini"; selected: root.new-model-base == "gemini"; chosen => { root.new-model-base = "gemini"; } }
+                }
+                Text { text: "Temperature (0.0-2.0)"; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+                SquareInput { text <=> root.new-model-temp; placeholder-text: "1.0"; width: 100px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SquareButton { label: root.tr-add-model; primary: true; width: 110px; clicked => { root.add-model(); } }
+                    SquareButton { label: "Cancelar"; width: 110px; clicked => { root.close-model-drawer(); } }
+                }
+                Text { text: root.models-status; color: #c3c6cc; font-size: 11px; wrap: word-wrap; }
+            }
+        }
 }

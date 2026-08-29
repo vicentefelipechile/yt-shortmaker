@@ -77,6 +77,19 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_test_connection(t!("keys_test_connection").to_string().into());
     app.set_tr_deps_installing(t!("deps_installing").to_string().into());
     app.set_tr_deps_install(t!("deps_install").to_string().into());
+    app.set_tr_fetching(t!("fetching_video").to_string().into());
+    app.set_tr_video_preview(t!("video_preview").to_string().into());
+    app.set_tr_video_duration(t!("video_duration").to_string().into());
+    app.set_tr_video_id(t!("video_id").to_string().into());
+    app.set_tr_video_no_thumb(t!("video_no_thumb").to_string().into());
+    app.set_tr_video_found(t!("video_found").to_string().into());
+    app.set_tr_model_display_name(t!("model_display_name").to_string().into());
+    app.set_tr_model_id_label(t!("model_id_label").to_string().into());
+    app.set_tr_model_base(t!("model_base_provider").to_string().into());
+    app.set_tr_add_model(t!("add_model").to_string().into());
+    app.set_tr_select_model(t!("select_model").to_string().into());
+    app.set_tr_delete_model(t!("delete_model").to_string().into());
+    app.set_tr_models_title(t!("models_title").to_string().into());
 }
 
 fn update_deps_ui(app: &MainWindow) -> bool {
@@ -101,8 +114,7 @@ fn spawn_ensure_tools(app_weak: slint::Weak<MainWindow>) {
             return;
         }
         app.set_deps_installing(true);
-        app.set_deps_error(t!("deps_installing").to_string().into());
-        // Clear per-panel shared error that was leaking via status-msg
+        app.set_toast_msg(t!("deps_installing").to_string().into());
         app.set_status_msg("".into());
         app.set_settings_status("".into());
         app.set_keys_status("".into());
@@ -110,22 +122,42 @@ fn spawn_ensure_tools(app_weak: slint::Weak<MainWindow>) {
     let weak = app_weak.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(setup::ensure_tools());
+        let weak2 = weak.clone();
+        let on_progress = move |msg: String| {
+            let w = weak2.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(app) = w.upgrade() {
+                    app.set_toast_msg(msg.into());
+                }
+            });
+        };
+        let res = rt.block_on(setup::ensure_tools_with_progress(on_progress));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
                 match res {
                     Ok(()) => {
                         app.set_deps_ok(true);
                         app.set_deps_installing(false);
-                        app.set_deps_error("".into());
+                        app.set_toast_msg(t!("deps_ok").to_string().into());
                         app.set_status_msg(t!("deps_ok").to_string().into());
+                        // Clear toast after 3s
+                        let w = app.as_weak();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(a) = w.upgrade() {
+                                    a.set_toast_msg("".into());
+                                }
+                            });
+                        });
                     }
                     Err(e) => {
+                        let msg = e.to_string();
+                        tracing::error!("auto-install failed: {msg}");
                         app.set_deps_installing(false);
                         app.set_deps_ok(false);
-                        app.set_deps_error(e.to_string().into());
-                        // Show the auto-install error only on the banner, not in every panel's status-msg
-                        // Keep per-panel statuses clean
+                        app.set_toast_msg(format!("Error: {msg}").into());
+                        app.set_deps_error(msg.into());
                     }
                 }
             }
@@ -195,6 +227,74 @@ fn refresh_keys_list(app: &MainWindow, config: &yt_shortmaker_core::config::AppC
         t!("keys_no_keys").to_string()
     };
     app.set_keys_list(text.into());
+    // Populate selectable model for per-row UI
+    if let Some(p) = config.ai.providers.get(&provider) {
+        let rows: Vec<KeyRow> = p
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| KeyRow {
+                name: k.name.clone().into(),
+                enabled: k.enabled,
+                index: i as i32,
+            })
+            .collect();
+        let len = rows.len() as i32;
+        app.set_keys_model(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+        // Keep selection in range
+        let sel = app.get_selected_key_index();
+        if sel >= len {
+            app.set_selected_key_index(-1);
+        }
+    } else {
+        app.set_keys_model(std::rc::Rc::new(slint::VecModel::from(Vec::<KeyRow>::new())).into());
+        app.set_selected_key_index(-1);
+    }
+}
+
+fn refresh_models_list(app: &MainWindow, config: &yt_shortmaker_core::config::AppConfig) {
+    if config.ai.custom_models.is_empty() {
+        app.set_models_list("".into());
+        app.set_models_model(
+            std::rc::Rc::new(slint::VecModel::from(Vec::<ModelRow>::new())).into(),
+        );
+        return;
+    }
+    let active = config.ai.active_model_id.clone().unwrap_or_default();
+    let text = config
+        .ai
+        .custom_models
+        .iter()
+        .map(|m| {
+            let marker = if m.id == active { "●" } else { " " };
+            let enabled = if m.enabled { "" } else { " [disabled]" };
+            format!(
+                "{} {} — {} [{}] (base: {}){}",
+                marker, m.id, m.display_name, m.model_id, m.base_provider, enabled
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.set_models_list(text.into());
+    let rows: Vec<ModelRow> = config
+        .ai
+        .custom_models
+        .iter()
+        .map(|m| ModelRow {
+            id: m.id.clone().into(),
+            display_name: m.display_name.clone().into(),
+            model_id: m.model_id.clone().into(),
+            base: m.base_provider.clone().into(),
+            enabled: m.enabled,
+            active: m.id == active,
+        })
+        .collect();
+    app.set_models_model(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+    app.set_selected_model_id(active.into());
+    // Keep the form's base in sync if empty
+    if app.get_new_model_base().trim().is_empty() {
+        app.set_new_model_base(config.ai.active_provider.clone().into());
+    }
 }
 
 fn refresh_home(app: &MainWindow) {
@@ -259,6 +359,19 @@ fn main() -> anyhow::Result<()> {
     populate_settings_ui(&app, &config_rc.borrow());
     apply_translations(&app);
     refresh_keys_list(&app, &config_rc.borrow());
+    {
+        let mut cfg = config_rc.borrow_mut();
+        let issues = cfg.normalize();
+        if !issues.is_empty() {
+            tracing::info!("config normalized: {:?}", issues);
+            let to_save = cfg.clone();
+            drop(cfg);
+            let _ = config_store::save(&to_save);
+        } else {
+            drop(cfg);
+        }
+    }
+    refresh_models_list(&app, &config_rc.borrow());
     let had_deps = update_deps_ui(&app);
     refresh_home(&app);
     if !had_deps {
@@ -286,12 +399,12 @@ fn main() -> anyhow::Result<()> {
         move || {
             if let Some(app) = app_weak.upgrade() {
                 if !app.get_deps_ok() {
-                    // Refresh error in case PATH changed.
                     update_deps_ui(&app);
                     if !app.get_deps_ok() {
-                        let msg = app.get_deps_error().to_string();
-                        app.set_url_error(msg.into());
-                        tracing::warn!("fetch blocked: missing deps");
+                        spawn_ensure_tools(app_weak.clone());
+                        app.set_url_error(t!("deps_installing").to_string().into());
+                        app.set_toast_msg(t!("deps_installing").to_string().into());
+                        tracing::info!("fetch auto-triggering deps install");
                         return;
                     }
                 }
@@ -299,7 +412,15 @@ fn main() -> anyhow::Result<()> {
                 match ytdlp::validate_media_url(&url) {
                     Ok(()) => {
                         app.set_url_error("".into());
-                        app.set_status_msg(t!("status_fetched", url = url).to_string().into());
+                        // Clear previous video and show dedicated fetching status below the button (not next to it)
+                        app.set_video_has_info(false);
+                        app.set_video_title("".into());
+                        app.set_video_id("".into());
+                        app.set_video_duration("".into());
+                        app.set_video_thumbnail("".into());
+                        app.set_video_thumbnail_image(slint::Image::default());
+                        app.set_status_msg(t!("fetching_video").to_string().into());
+                        app.set_video_title("".into());
                         let cfg = config_rc.borrow().clone();
                         let app_weak2 = app_weak.clone();
                         std::thread::spawn(move || {
@@ -316,21 +437,83 @@ fn main() -> anyhow::Result<()> {
                                 if let Some(app) = app_weak2.upgrade() {
                                     match res {
                                         Ok(info) => {
-                                            app.set_video_title(
-                                                format!(
-                                                    "{} ({}s)",
-                                                    info.title, info.duration_secs as u64
+                                            let duration_str = {
+                                                let secs = info.duration_secs as u64;
+                                                let h = secs / 3600;
+                                                let m = (secs % 3600) / 60;
+                                                let s = secs % 60;
+                                                if h > 0 {
+                                                    format!("{h:02}:{m:02}:{s:02}")
+                                                } else {
+                                                    format!("{m:02}:{s:02}")
+                                                }
+                                            };
+                                            app.set_video_title(info.title.clone().into());
+                                            app.set_video_id(info.video_id.clone().into());
+                                            app.set_video_duration(duration_str.clone().into());
+                                            app.set_video_thumbnail(
+                                                info.thumbnail.clone().unwrap_or_default().into(),
+                                            );
+                                            app.set_video_has_info(true);
+                                            app.set_url_error("".into());
+                                            app.set_status_msg(
+                                                t!(
+                                                    "video_found",
+                                                    title = info.title.clone(),
+                                                    duration = duration_str.clone()
                                                 )
+                                                .to_string()
                                                 .into(),
                                             );
+                                            // Best-effort thumbnail download for dedicated panel
+                                            if let Some(thumb_url) = info.thumbnail.clone() {
+                                                let weak3 = app_weak2.clone();
+                                                std::thread::spawn(move || {
+                                                    let rt2 = tokio::runtime::Runtime::new().unwrap();
+                                                    let img_res = rt2.block_on(async {
+                                                        let resp = reqwest::get(&thumb_url).await?;
+                                                        let bytes = resp.bytes().await?;
+                                                        let tmp = std::env::temp_dir()
+                                                            .join("yt-shortmaker-thumb.jpg");
+                                                        tokio::fs::write(&tmp, &bytes).await?;
+                                                        anyhow::Ok(tmp)
+                                                    });
+                                                    if let Ok(tmp_path) = img_res {
+                                                        let _ = slint::invoke_from_event_loop(
+                                                            move || {
+                                                                if let Some(a) = weak3.upgrade() {
+                                                                    if let Ok(img) =
+                                                                        slint::Image::load_from_path(
+                                                                            &tmp_path,
+                                                                        ) {
+                                                                        a.set_video_thumbnail_image(
+                                                                            img,
+                                                                        );
+                                                                    }
+                                                                }
+                                                            },
+                                                        );
+                                                    }
+                                                });
+                                            }
                                         }
-                                        Err(e) => app.set_url_error(e.to_string().into()),
+                                        Err(e) => {
+                                            app.set_video_has_info(false);
+                                            app.set_url_error(e.to_string().into());
+                                            app.set_status_msg(
+                                                format!("{}: {e}", t!("error")).into(),
+                                            );
+                                        }
                                     }
                                 }
                             });
                         });
                     }
-                    Err(e) => app.set_url_error(e.to_string().into()),
+                    Err(e) => {
+                        app.set_video_has_info(false);
+                        app.set_url_error(e.to_string().into());
+                        app.set_status_msg(format!("{}: {e}", t!("error")).into());
+                    }
                 }
             }
         }
@@ -344,9 +527,10 @@ fn main() -> anyhow::Result<()> {
                 if !app.get_deps_ok() {
                     update_deps_ui(&app);
                     if !app.get_deps_ok() {
-                        let msg = app.get_deps_error().to_string();
-                        app.set_status_msg(format!("{}: {msg}", t!("error")).into());
-                        tracing::warn!("analyze blocked: missing deps");
+                        spawn_ensure_tools(app_weak.clone());
+                        app.set_status_msg(t!("deps_installing").to_string().into());
+                        app.set_toast_msg(t!("deps_installing").to_string().into());
+                        tracing::info!("analyze auto-triggering deps install");
                         return;
                     }
                 }
@@ -561,6 +745,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(()) => {
                         refresh_keys_list(&app, &cfg);
                         app.set_new_key_value("".into());
+                        app.set_show_key_drawer(false);
                         app.set_keys_status(t!("msg_api_key_saved").to_string().into());
                         app.set_settings_status("".into());
                         app.set_status_msg("".into());
@@ -632,6 +817,173 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Per-row selectable API keys + lateral drawers
+    app.on_select_key({
+        let app_weak = app_weak.clone();
+        move |idx: i32| {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_selected_key_index(idx);
+            }
+        }
+    });
+    app.on_delete_key_at({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move |idx: i32| {
+            if let Some(app) = app_weak.upgrade() {
+                let mut cfg = config_rc.borrow_mut();
+                let provider = cfg.ai.active_provider.clone();
+                let mut removed_name: Option<String> = None;
+                if let Some(p) = cfg.ai.providers.get_mut(&provider) {
+                    let u = idx as usize;
+                    if u < p.keys.len() {
+                        let r = p.keys.remove(u);
+                        removed_name = Some(r.name.clone());
+                        if let Err(e) = yt_shortmaker_core::security::keyring::delete_secret(
+                            "yt-shortmaker",
+                            &r.name,
+                        ) {
+                            tracing::warn!("delete_secret failed for {}: {e}", r.name);
+                        }
+                    }
+                }
+                if removed_name.is_none() {
+                    app.set_keys_status(format!("{}: index {idx} not found", t!("error")).into());
+                    return;
+                }
+                let _ = config_store::save(&cfg);
+                refresh_keys_list(&app, &cfg);
+                app.set_selected_key_index(-1);
+                app.set_keys_status(format!("Key '{:?}' deleted", removed_name.unwrap()).into());
+            }
+        }
+    });
+    app.on_toggle_key_at({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move |idx: i32| {
+            if let Some(app) = app_weak.upgrade() {
+                let mut cfg = config_rc.borrow_mut();
+                let provider = cfg.ai.active_provider.clone();
+                let mut ok = false;
+                if let Some(p) = cfg.ai.providers.get_mut(&provider) {
+                    let u = idx as usize;
+                    if u < p.keys.len() {
+                        p.keys[u].enabled = !p.keys[u].enabled;
+                        ok = true;
+                    }
+                }
+                if !ok {
+                    app.set_keys_status(format!("{}: index {idx} not found", t!("error")).into());
+                    return;
+                }
+                let _ = config_store::save(&cfg);
+                refresh_keys_list(&app, &cfg);
+                app.set_keys_status(t!("status_settings_saved").to_string().into());
+            }
+        }
+    });
+    app.on_open_key_drawer({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_new_key_value("".into());
+                app.set_keys_status("".into());
+                app.set_show_key_drawer(true);
+            }
+        }
+    });
+    app.on_close_key_drawer({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_show_key_drawer(false);
+                app.set_new_key_value("".into());
+            }
+        }
+    });
+    app.on_open_model_drawer({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_new_model_display_name("".into());
+                app.set_new_model_id("".into());
+                app.set_new_model_temp("".into());
+                app.set_show_model_drawer(true);
+            }
+        }
+    });
+    app.on_close_model_drawer({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_show_model_drawer(false);
+            }
+        }
+    });
+    app.on_select_model_id({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move |id: slint::SharedString| {
+            let id = id.to_string();
+            if let Some(app) = app_weak.upgrade() {
+                let mut cfg = config_rc.borrow_mut();
+                if let Some(m) = cfg.ai.custom_models.iter().find(|m| m.id == id).cloned() {
+                    cfg.ai.active_model_id = Some(m.id.clone());
+                    cfg.ai.active_provider = m.base_provider.clone();
+                    let to_save = cfg.clone();
+                    drop(cfg);
+                    if let Err(e) = config_store::save(&to_save) {
+                        app.set_models_status(format!("{}: {e}", t!("error")).into());
+                        return;
+                    }
+                    let cfg_ref = config_rc.borrow();
+                    refresh_models_list(&app, &cfg_ref);
+                    app.set_models_status(format!("Selected '{}'", m.display_name).into());
+                    app.set_selected_model_id(id.into());
+                }
+            }
+        }
+    });
+    app.on_delete_model_id({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move |id: slint::SharedString| {
+            let id = id.to_string();
+            if let Some(app) = app_weak.upgrade() {
+                let mut cfg = config_rc.borrow_mut();
+                let before = cfg.ai.custom_models.len();
+                cfg.ai.custom_models.retain(|m| m.id != id);
+                if cfg.ai.custom_models.len() == before {
+                    app.set_models_status(format!("{}: '{id}' not found", t!("error")).into());
+                    return;
+                }
+                if cfg.ai.active_model_id.as_deref() == Some(&id) {
+                    cfg.ai.active_model_id = cfg
+                        .ai
+                        .custom_models
+                        .first()
+                        .map(|m| m.id.clone())
+                        .or(Some("gemini-3.7-flash".to_owned()));
+                    if let Some(new_active) = cfg.ai.active_model_id.clone() {
+                        if let Some(m) = cfg.ai.custom_models.iter().find(|m| m.id == new_active) {
+                            cfg.ai.active_provider = m.base_provider.clone();
+                        }
+                    }
+                }
+                let to_save = cfg.clone();
+                drop(cfg);
+                if let Err(e) = config_store::save(&to_save) {
+                    app.set_models_status(format!("{}: {e}", t!("error")).into());
+                    return;
+                }
+                let cfg_ref = config_rc.borrow();
+                refresh_models_list(&app, &cfg_ref);
+                app.set_models_status(format!("Model '{id}' deleted").into());
+            }
+        }
+    });
+
     app.on_test_connection({
         let config_rc = config_rc.clone();
         let app_weak = app_weak.clone();
@@ -675,6 +1027,188 @@ fn main() -> anyhow::Result<()> {
                         }
                     });
                 });
+            }
+        }
+    });
+
+    app.on_add_model({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let display = app
+                    .get_new_model_display_name()
+                    .to_string()
+                    .trim()
+                    .to_owned();
+                let model_id_raw = app.get_new_model_id().to_string().trim().to_owned();
+                let base = app.get_new_model_base().to_string().trim().to_lowercase();
+                let temp_str = app.get_new_model_temp().to_string().trim().to_owned();
+                if display.is_empty() || model_id_raw.is_empty() {
+                    app.set_models_status(
+                        format!("{}: display name and model ID required", t!("error")).into(),
+                    );
+                    return;
+                }
+                let base = if base.is_empty() {
+                    "gemini".to_string()
+                } else {
+                    base
+                };
+                let temp = if temp_str.is_empty() {
+                    None
+                } else {
+                    match temp_str.parse::<f32>() {
+                        Ok(v) if (0.0..=2.0).contains(&v) => Some(v),
+                        _ => {
+                            app.set_models_status(
+                                format!("{}: temperature must be 0.0-2.0", t!("error")).into(),
+                            );
+                            return;
+                        }
+                    }
+                };
+                let id = model_id_raw
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .to_string();
+                let id = if id.is_empty() {
+                    format!("model-{}", chrono::Local::now().format("%H%M%S"))
+                } else {
+                    id
+                };
+                let mut cfg = config_rc.borrow_mut();
+                if cfg.ai.custom_models.iter().any(|m| m.id == id) {
+                    app.set_models_status(
+                        format!("{}: id '{id}' already exists", t!("error")).into(),
+                    );
+                    return;
+                }
+                let new_model = yt_shortmaker_core::config::CustomModel {
+                    id: id.clone(),
+                    display_name: display.clone(),
+                    base_provider: base.clone(),
+                    model_id: model_id_raw.clone(),
+                    temperature: temp,
+                    media_resolution: None,
+                    enabled: true,
+                };
+                if let Err(e) = new_model.validate() {
+                    app.set_models_status(format!("{}: {e}", t!("error")).into());
+                    return;
+                }
+                // Ensure base provider exists
+                if !cfg.ai.providers.contains_key(&base) {
+                    cfg.ai.providers.insert(
+                        base.clone(),
+                        yt_shortmaker_core::config::ProviderConfig::default(),
+                    );
+                }
+                cfg.ai.custom_models.push(new_model);
+                cfg.ai.active_model_id = Some(id.clone());
+                cfg.ai.active_provider = base.clone();
+                let to_save = cfg.clone();
+                drop(cfg);
+                match config_store::save(&to_save) {
+                    Ok(()) => {
+                        let cfg_ref = config_rc.borrow();
+                        refresh_models_list(&app, &cfg_ref);
+                        app.set_models_status(format!("Model '{id}' added and selected").into());
+                        app.set_new_model_display_name("".into());
+                        app.set_new_model_id("".into());
+                        app.set_new_model_temp("".into());
+                        app.set_show_model_drawer(false);
+                    }
+                    Err(e) => app.set_models_status(format!("{}: {e}", t!("error")).into()),
+                }
+            }
+        }
+    });
+
+    app.on_select_model({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let id = app.get_new_model_id().to_string().trim().to_owned();
+                if id.is_empty() {
+                    app.set_models_status(
+                        format!("{}: enter model ID to select", t!("error")).into(),
+                    );
+                    return;
+                }
+                let mut cfg = config_rc.borrow_mut();
+                if let Some(m) = cfg.ai.custom_models.iter().find(|m| m.id == id).cloned() {
+                    cfg.ai.active_model_id = Some(m.id.clone());
+                    cfg.ai.active_provider = m.base_provider.clone();
+                    let to_save = cfg.clone();
+                    drop(cfg);
+                    if let Err(e) = config_store::save(&to_save) {
+                        app.set_models_status(format!("{}: {e}", t!("error")).into());
+                        return;
+                    }
+                    let cfg_ref = config_rc.borrow();
+                    refresh_models_list(&app, &cfg_ref);
+                    app.set_models_status(
+                        format!("Selected '{}' ({})", m.display_name, m.model_id).into(),
+                    );
+                } else {
+                    app.set_models_status(
+                        format!("{}: model '{id}' not found", t!("error")).into(),
+                    );
+                }
+            }
+        }
+    });
+
+    app.on_delete_model({
+        let config_rc = config_rc.clone();
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let id = app.get_new_model_id().to_string().trim().to_owned();
+                if id.is_empty() {
+                    app.set_models_status(
+                        format!("{}: enter model ID to delete", t!("error")).into(),
+                    );
+                    return;
+                }
+                let mut cfg = config_rc.borrow_mut();
+                let len_before = cfg.ai.custom_models.len();
+                cfg.ai.custom_models.retain(|m| m.id != id);
+                if cfg.ai.custom_models.len() == len_before {
+                    app.set_models_status(
+                        format!("{}: model '{id}' not found", t!("error")).into(),
+                    );
+                    return;
+                }
+                if cfg.ai.active_model_id.as_deref() == Some(&id) {
+                    cfg.ai.active_model_id = cfg
+                        .ai
+                        .custom_models
+                        .first()
+                        .map(|m| m.id.clone())
+                        .or(Some("gemini-3.7-flash".to_owned()));
+                    if let Some(new_active) = cfg.ai.active_model_id.clone() {
+                        if let Some(m) = cfg.ai.custom_models.iter().find(|m| m.id == new_active) {
+                            cfg.ai.active_provider = m.base_provider.clone();
+                        }
+                    }
+                }
+                let to_save = cfg.clone();
+                drop(cfg);
+                match config_store::save(&to_save) {
+                    Ok(()) => {
+                        let cfg_ref = config_rc.borrow();
+                        refresh_models_list(&app, &cfg_ref);
+                        app.set_models_status(format!("Model '{id}' deleted").into());
+                        app.set_new_model_id("".into());
+                    }
+                    Err(e) => app.set_models_status(format!("{}: {e}", t!("error")).into()),
+                }
             }
         }
     });

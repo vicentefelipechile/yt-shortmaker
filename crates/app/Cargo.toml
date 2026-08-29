@@ -20,6 +20,7 @@ open = "5.4"
 dirs = "6.0"
 rust-i18n = "4.2"
 chrono = "0.4"
+reqwest = { version = "0.13", features = ["json"] }
 
 [build-dependencies]
 winresource = "0.1"
