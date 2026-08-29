@@ -2,7 +2,10 @@
 // cli::main — Headless CLI (preview/transform/batch/analyze)
 // =================================================================================================
 
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
+use yt_shortmaker_core::plano::schema::{create_default_plano, load_plano};
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -17,32 +20,42 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Generate a preview image from a video + plano.
     Preview {
         video: String,
         #[arg(long)]
         plano: Option<String>,
+        #[arg(long)]
+        output: Option<String>,
     },
-    /// Transform a single video via plano.
     Transform {
         video: String,
         out: Option<String>,
         #[arg(long)]
         plano: Option<String>,
     },
-    /// Batch transform all clips in a directory.
     Batch {
         input_dir: String,
         output_dir: Option<String>,
         #[arg(long)]
         plano: Option<String>,
     },
-    /// Analyze a URL via configured AI provider.
     Analyze {
         url: String,
         #[arg(long, default_value = "gemini")]
         provider: String,
     },
+}
+
+// -------------------------------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------------------------------
+
+fn resolve_plano(path: Option<String>) -> anyhow::Result<Vec<yt_shortmaker_core::plano::schema::PlanoObject>> {
+    if let Some(p) = path {
+        load_plano(&p)
+    } else {
+        Ok(create_default_plano())
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -55,21 +68,57 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Preview { video, plano } => {
-            println!("preview: video={video} plano={plano:?} (not yet implemented)");
+        Commands::Preview { video, plano, output } => {
+            let plano = resolve_plano(plano)?;
+            let (filter, inputs) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
+            println!("inputs: {inputs:?}");
+            println!("filter: {filter}");
+            if let Some(out) = output {
+                println!("Would generate preview at {out} (requires ffmpeg)");
+            }
         }
         Commands::Transform { video, out, plano } => {
-            println!("transform: video={video} out={out:?} plano={plano:?} (not yet implemented)");
+            let plano = resolve_plano(plano)?;
+            let out = out.unwrap_or_else(|| "output.mp4".into());
+            let (filter, inputs) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
+            println!("Transform {video} -> {out}");
+            println!("inputs: {inputs:?}");
+            println!("filter: {filter}");
         }
         Commands::Batch {
             input_dir,
             output_dir,
             plano,
         } => {
-            println!("batch: in={input_dir} out={output_dir:?} plano={plano:?} (not yet implemented)");
+            let plano = resolve_plano(plano)?;
+            let out = output_dir.unwrap_or_else(|| "./output".into());
+            let entries = std::fs::read_dir(&input_dir)?;
+            let mut count = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "mp4" {
+                        let out_path = Path::new(&out).join(format!("short_{count}.mp4"));
+                        let (filter, _) =
+                            yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &path.to_string_lossy());
+                        println!("{} -> {} | filter len {}", path.display(), out_path.display(), filter.len());
+                        count += 1;
+                    }
+                }
+            }
+            println!("Batch: {count} clips queued");
         }
         Commands::Analyze { url, provider } => {
-            println!("analyze: url={url} provider={provider} (not yet implemented)");
+            yt_shortmaker_core::media::ytdlp::validate_media_url(&url)?;
+            println!("Analyze {url} via {provider} (mock — real Gemini in next iteration)");
+            let moments = vec![yt_shortmaker_core::types::VideoMoment {
+                start_time: "00:00:05".into(),
+                end_time: "00:00:15".into(),
+                category: "hook".into(),
+                description: "Mock moment".into(),
+                dialogue: vec![],
+            }];
+            println!("{}", serde_json::to_string_pretty(&moments)?);
         }
     }
 
