@@ -2,6 +2,7 @@
 // media — ffmpeg / ytdlp / pipeline re-exports
 // =================================================================================================
 
+pub mod chunk;
 pub mod ffmpeg;
 pub mod pipeline;
 pub mod ytdlp;

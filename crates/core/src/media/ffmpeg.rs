@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 // -------------------------------------------------------------------------------------------------
 
 pub fn get_duration(path: &Path) -> Result<f64> {
-    let output = std::process::Command::new("ffprobe")
+    let output = std::process::Command::new(crate::setup::ffprobe_bin())
         .args([
             "-v",
             "error",
@@ -25,7 +25,13 @@ pub fn get_duration(path: &Path) -> Result<f64> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .context("Failed to run ffprobe")?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::setup::ffmpeg_missing_error()
+            } else {
+                anyhow::Error::from(e).context("Failed to run ffprobe")
+            }
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -37,12 +43,8 @@ pub fn get_duration(path: &Path) -> Result<f64> {
     Ok(v)
 }
 
-pub fn get_duration_u64(path: &Path) -> Result<u64> {
-    Ok(get_duration(path)? as u64)
-}
-
 pub fn get_resolution(path: &Path) -> Result<(u32, u32)> {
-    let output = std::process::Command::new("ffprobe")
+    let output = std::process::Command::new(crate::setup::ffprobe_bin())
         .args([
             "-v",
             "error",
@@ -57,7 +59,13 @@ pub fn get_resolution(path: &Path) -> Result<(u32, u32)> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .context("Failed to run ffprobe for resolution")?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::setup::ffmpeg_missing_error()
+            } else {
+                anyhow::Error::from(e).context("Failed to run ffprobe for resolution")
+            }
+        })?;
 
     let s = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = s.trim().split('x').collect();
@@ -67,26 +75,6 @@ pub fn get_resolution(path: &Path) -> Result<(u32, u32)> {
     let w: u32 = parts[0].parse().context("Invalid width")?;
     let h: u32 = parts[1].parse().context("Invalid height")?;
     Ok((w, h))
-}
-
-pub fn is_ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-pub fn is_ffprobe_available() -> bool {
-    std::process::Command::new("ffprobe")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 // -------------------------------------------------------------------------------------------------
