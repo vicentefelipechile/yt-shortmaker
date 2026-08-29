@@ -147,7 +147,17 @@ The following are prohibited unless the user explicitly requests them:
 - Changing the navigation, sizing, spacing, typography, or visual hierarchy without a concrete request.
 - Rewriting an entire screen when a local style correction is sufficient.
 
-## 9. Change Checklist
+## 9. Past Mistakes — Do Not Repeat
+
+These are real bugs shipped before, now forbidden:
+
+- **TouchArea over buttons (crates/app/ui/app.slint:624,669):** Never put `TouchArea { clicked => select }` *after* `HorizontalLayout { SquareButton }` inside the same `Rectangle`. The last child is painted on top and steals the click — `Borrar`/`Seleccionar`/`On/Off` become dead. Always put `TouchArea` *first* (behind) and the button row last, so buttons hit-test first.
+- **Drawer closes on inner click (crates/app/ui/app.slint:732,764):** An overlay `Rectangle { TouchArea{ close } }` behind a drawer will receive clicks through empty padding if the drawer has no hit-test. Every drawer `Rectangle` must start with an empty `TouchArea { }` to consume clicks inside the panel and prevent the overlay from closing it.
+- **Shared log property across tabs (crates/app/ui/app.slint:652,678 + crates/app/src/main.rs:825):** Never bind `Text { text: keys-status }` in two different panels (`PROVEEDOR DE IA` and `CLAVES API` drawers). One `set_keys_status` then leaks the same error to 3 places at once. Use per-panel properties: `models-status` for provider/model, `keys-status` for API keys, `settings-status` for settings, `toast-msg` for global progress.
+- **Plain-text lists (crates/app/ui/app.slint:588,652):** Never render `models-list`/`keys-list` as `Text { text: root.models-list }` with `"\n"` joins. They are not selectable, not per-row actionable, and break UX. Use `in property <[ModelRow]>` / `<[KeyRow]>` + `for m in ...: SelectableRow` with `active`/`selected` states, inside a `ScrollView` of fixed height.
+- **Cramming form into list panel:** Never put `SquareInput` for `Añadir modelo/clave` directly under the list in the same `VerticalLayout`. Use a lateral drawer (`x: parent.width - 380px` + `animate x 180ms`) opened by `Añadir...` and closed by `Cancelar` or overlay click.
+
+## 10. Change Checklist
 
 Before submitting a UI change, verify:
 
