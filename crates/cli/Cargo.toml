@@ -12,8 +12,10 @@ path = "src/main.rs"
 [dependencies]
 yt-shortmaker-core = { path = "../core" }
 clap = { version = "4.6", features = ["derive"] }
-tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1.0"
+chrono = "0.4"

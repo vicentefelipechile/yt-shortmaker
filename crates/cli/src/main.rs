@@ -3,8 +3,12 @@
 // =================================================================================================
 
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
+use yt_shortmaker_core::config::store as config_store;
+use yt_shortmaker_core::media::pipeline::{Pipeline, PipelineCtx, PipelineEvent};
 use yt_shortmaker_core::plano::schema::{create_default_plano, load_plano};
 
 // -------------------------------------------------------------------------------------------------
@@ -12,7 +16,11 @@ use yt_shortmaker_core::plano::schema::{create_default_plano, load_plano};
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "yt-shortmaker-cli", version, about = "Headless CLI for yt-shortmaker v2")]
+#[command(
+    name = "yt-shortmaker-cli",
+    version,
+    about = "Headless CLI for yt-shortmaker v2"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -50,7 +58,9 @@ enum Commands {
 // Helpers
 // -------------------------------------------------------------------------------------------------
 
-fn resolve_plano(path: Option<String>) -> anyhow::Result<Vec<yt_shortmaker_core::plano::schema::PlanoObject>> {
+fn resolve_plano(
+    path: Option<String>,
+) -> anyhow::Result<Vec<yt_shortmaker_core::plano::schema::PlanoObject>> {
     if let Some(p) = path {
         load_plano(&p)
     } else {
@@ -68,9 +78,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Preview { video, plano, output } => {
+        Commands::Preview {
+            video,
+            plano,
+            output,
+        } => {
             let plano = resolve_plano(plano)?;
-            let (filter, inputs) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
+            let (filter, inputs) =
+                yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
             println!("inputs: {inputs:?}");
             println!("filter: {filter}");
             if let Some(out) = output {
@@ -80,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Transform { video, out, plano } => {
             let plano = resolve_plano(plano)?;
             let out = out.unwrap_or_else(|| "output.mp4".into());
-            let (filter, inputs) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
+            let (filter, inputs) =
+                yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
             println!("Transform {video} -> {out}");
             println!("inputs: {inputs:?}");
             println!("filter: {filter}");
@@ -99,9 +115,16 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ext) = path.extension() {
                     if ext == "mp4" {
                         let out_path = Path::new(&out).join(format!("short_{count}.mp4"));
-                        let (filter, _) =
-                            yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &path.to_string_lossy());
-                        println!("{} -> {} | filter len {}", path.display(), out_path.display(), filter.len());
+                        let (filter, _) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(
+                            &plano,
+                            &path.to_string_lossy(),
+                        );
+                        println!(
+                            "{} -> {} | filter len {}",
+                            path.display(),
+                            out_path.display(),
+                            filter.len()
+                        );
                         count += 1;
                     }
                 }
@@ -110,15 +133,46 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Analyze { url, provider } => {
             yt_shortmaker_core::media::ytdlp::validate_media_url(&url)?;
-            println!("Analyze {url} via {provider} (mock — real Gemini in next iteration)");
-            let moments = vec![yt_shortmaker_core::types::VideoMoment {
-                start_time: "00:00:05".into(),
-                end_time: "00:00:15".into(),
-                category: "hook".into(),
-                description: "Mock moment".into(),
-                dialogue: vec![],
-            }];
-            println!("{}", serde_json::to_string_pretty(&moments)?);
+            let mut cfg = config_store::load().unwrap_or_default();
+            if provider != "gemini" {
+                cfg.ai.active_provider = provider.clone();
+            }
+            let work_dir = std::env::temp_dir().join("yt-shortmaker-v2").join(format!(
+                "cli-{}-{}",
+                yt_shortmaker_core::media::ytdlp::extract_video_id(&url)
+                    .unwrap_or_else(|| "video".into()),
+                chrono::Local::now().format("%Y%m%d%H%M%S")
+            ));
+            let output_dir = cfg
+                .output_dir
+                .clone()
+                .unwrap_or_else(|| "output".to_string());
+            let pipeline = Pipeline::new();
+            let out = pipeline
+                .run(
+                    PipelineCtx {
+                        url,
+                        config: Arc::new(cfg),
+                        work_dir,
+                        output_dir: Path::new(&output_dir).to_path_buf(),
+                        cancellation: CancellationToken::new(),
+                    },
+                    |ev| match ev {
+                        PipelineEvent::StageChanged(stage) => {
+                            eprintln!("[stage] {stage:?}");
+                        }
+                        PipelineEvent::Progress(p, msg) => {
+                            eprintln!("[{:.0}%] {msg}", p * 100.0);
+                        }
+                        PipelineEvent::Log(msg) => eprintln!("[log] {msg}"),
+                    },
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&out.moments)?);
+            println!("---");
+            println!("video: {}", out.video_id);
+            println!("chunks: {}", out.chunks.len());
+            println!("output: {}", out.video_path.display());
         }
     }
 
