@@ -2,14 +2,12 @@
 name = "yt-shortmaker-app"
 version.workspace = true
 edition.workspace = true
-description = "Native egui app for yt-shortmaker v2"
+description = "Native Slint app for yt-shortmaker v2"
 license.workspace = true
 
 [dependencies]
 yt-shortmaker-core = { path = "../core" }
-eframe = { version = "0.35", features = ["default"] }
-egui = "0.35"
-egui_extras = { version = "0.35", features = ["image", "svg"] }
+slint = "1.17"
 tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -23,3 +21,4 @@ rust-i18n = "4.2"
 
 [build-dependencies]
 winresource = "0.1"
+slint-build = "1.17"

@@ -1,91 +1,110 @@
 // =================================================================================================
-// app::main — Native egui entry point
+// app::main — Slint native entry point
 // =================================================================================================
 
-mod actions;
-mod state;
-mod ui;
+rust_i18n::i18n!("../../locales", fallback = "en");
 
-use eframe::egui;
+use rust_i18n::t;
 use tracing_subscriber::EnvFilter;
+use yt_shortmaker_core::media::ytdlp;
 
-use state::{AppState, Route};
-use yt_shortmaker_core::config::store as config_store;
+slint::include_modules!();
 
 // -------------------------------------------------------------------------------------------------
-// Types
+// Helpers
 // -------------------------------------------------------------------------------------------------
 
-struct App {
-    state: AppState,
-    core_version: &'static str,
+fn apply_translations(app: &MainWindow) {
+    app.set_tr_navigate(t!("nav_navigate").to_string().into());
+    app.set_tr_home(t!("nav_home").to_string().into());
+    app.set_tr_new_project(t!("nav_new_project").to_string().into());
+    app.set_tr_export_standalone(t!("nav_export_standalone").to_string().into());
+    app.set_tr_settings(t!("nav_settings").to_string().into());
+    app.set_tr_keys(t!("nav_keys").to_string().into());
+    app.set_tr_home_recent(t!("home_recent").to_string().into());
+    app.set_tr_home_empty(t!("home_empty").to_string().into());
+    app.set_tr_new_project_title(t!("new_project").to_string().into());
+    app.set_tr_url_label(t!("new_project_url_label").to_string().into());
+    app.set_tr_fetch(t!("new_project_fetch").to_string().into());
+    app.set_tr_export_title(t!("export_standalone").to_string().into());
+    app.set_tr_export_desc(t!("export_standalone_desc").to_string().into());
+    app.set_tr_keys_title(t!("nav_keys").to_string().into());
 }
 
 // -------------------------------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------------------------------
 
-impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let config = config_store::load().unwrap_or_default();
-        Self {
-            state: AppState::new(config),
-            core_version: yt_shortmaker_core::version(),
-        }
-    }
-}
-
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("top").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("yt-shortmaker v2");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("core {}", self.core_version));
-                });
-            });
-        });
-
-        egui::Panel::left("side").show(ui, |ui| {
-            ui.heading("Navigate");
-            ui.separator();
-            for (label, route) in [
-                ("Home", Route::Home),
-                ("New Project", Route::NewProject),
-                ("Export Standalone", Route::ExportStandalone),
-                ("Settings", Route::Settings),
-                ("Keys", Route::Keys),
-            ] {
-                let selected = self.state.route == route;
-                if ui.selectable_label(selected, label).clicked() {
-                    self.state.navigate(route);
-                }
-            }
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui::show_central(ui, &mut self.state);
-        });
-    }
-}
-
-fn main() -> eframe::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1024.0, 700.0])
-        .with_min_inner_size([900.0, 600.0]);
+    let config = yt_shortmaker_core::config::store::load().unwrap_or_default();
+    rust_i18n::set_locale(&config.language);
 
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
+    let app = MainWindow::new()?;
+    app.set_core_version(yt_shortmaker_core::version().into());
+    apply_translations(&app);
 
-    eframe::run_native(
-        "yt-shortmaker v2",
-        options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    )
+    let app_weak = app.as_weak();
+
+    app.on_navigate({
+        let app_weak = app_weak.clone();
+        move |route| {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_route(route);
+            }
+        }
+    });
+
+    app.on_fetch_info({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let url: String = app.get_url_input().into();
+                match ytdlp::validate_media_url(&url) {
+                    Ok(()) => {
+                        app.set_url_error("".into());
+                        app.set_video_title("Video title (mock)".into());
+                        app.set_status_msg(t!("status_fetched", url = url).to_string().into());
+                    }
+                    Err(e) => app.set_url_error(e.to_string().into()),
+                }
+            }
+        }
+    });
+
+    app.on_start_analyze({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_progress(0.35);
+                app.set_status_msg(t!("status_analyzing").to_string().into());
+                app.set_progress(1.0);
+                app.set_status_msg(t!("new_project_analyze_complete").to_string().into());
+            }
+        }
+    });
+
+    app.on_add_moment({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_status_msg(t!("status_moment_added").to_string().into());
+            }
+        }
+    });
+
+    app.on_save_settings({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_status_msg(t!("status_settings_saved").to_string().into());
+            }
+        }
+    });
+
+    app.run()?;
+    Ok(())
 }

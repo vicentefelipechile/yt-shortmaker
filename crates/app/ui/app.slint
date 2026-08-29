@@ -1,0 +1,169 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "yt-shortmaker v2";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 960px;
+    min-height: 620px;
+    background: #121214;
+
+    in-out property <string> route: "home";
+    in-out property <string> url-input: "";
+    in-out property <string> url-error: "";
+    in-out property <string> video-title: "";
+    in-out property <float> progress: 0.0;
+    in-out property <string> status-msg: "";
+    in-out property <string> core-version: "2.0.0";
+
+    in property <string> tr-navigate: "Navigate";
+    in property <string> tr-home: "Home";
+    in property <string> tr-new-project: "New Project";
+    in property <string> tr-export-standalone: "Export Standalone";
+    in property <string> tr-settings: "Settings";
+    in property <string> tr-keys: "Keys";
+    in property <string> tr-home-recent: "Recent projects";
+    in property <string> tr-home-empty: "No projects yet. Create a new project to start.";
+    in property <string> tr-new-project-title: "New Project";
+    in property <string> tr-url-label: "Paste YouTube URL:";
+    in property <string> tr-fetch: "Fetch Info";
+    in property <string> tr-export-title: "Export Standalone";
+    in property <string> tr-export-desc: "Select clips and a plano to export without AI.";
+    in property <string> tr-keys-title: "API Keys";
+
+    callback navigate(string);
+    callback fetch-info();
+    callback start-analyze();
+    callback add-moment();
+    callback save-settings();
+
+    HorizontalBox {
+        spacing: 0px;
+        padding: 0px;
+
+        Rectangle {
+            width: 220px;
+            background: #18181b;
+            border-width: 1px;
+            border-color: #2d2d37;
+
+            VerticalBox {
+                padding: 16px;
+                spacing: 8px;
+                alignment: start;
+
+                Text {
+                    text: "yt-shortmaker v2";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #ffffff;
+                }
+                Text {
+                    text: "core " + root.core-version;
+                    font-size: 11px;
+                    color: #a1a1aa;
+                }
+                Rectangle { height: 1px; background: #2d2d37; }
+
+                Text { text: root.tr-navigate; font-size: 12px; color: #a1a1aa; font-weight: 600; }
+
+                Button {
+                    text: root.tr-home;
+                    primary: route == "home";
+                    clicked => { root.navigate("home"); }
+                }
+                Button {
+                    text: root.tr-new-project;
+                    primary: route == "new-project";
+                    clicked => { root.navigate("new-project"); }
+                }
+                Button {
+                    text: root.tr-export-standalone;
+                    primary: route == "export";
+                    clicked => { root.navigate("export"); }
+                }
+                Button {
+                    text: root.tr-settings;
+                    primary: route == "settings";
+                    clicked => { root.navigate("settings"); }
+                }
+                Button {
+                    text: root.tr-keys;
+                    primary: route == "keys";
+                    clicked => { root.navigate("keys"); }
+                }
+            }
+        }
+
+        Rectangle {
+            background: #121214;
+
+            VerticalBox {
+                padding: 24px;
+                spacing: 12px;
+
+                if route == "home": VerticalBox {
+                    Text { text: root.tr-home-recent; font-size: 20px; font-weight: 700; color: #ffffff; }
+                    Rectangle { height: 1px; background: #2d2d37; }
+                    Text { text: root.tr-home-empty; color: #a1a1aa; wrap: word-wrap; }
+                }
+
+                if route == "new-project": VerticalBox {
+                    Text { text: root.tr-new-project-title; font-size: 20px; font-weight: 700; color: #ffffff; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Text { text: root.tr-url-label; color: #e4e4e7; vertical-alignment: center; }
+                        LineEdit {
+                            placeholder-text: "https://youtube.com/watch?v=...";
+                            text <=> root.url-input;
+                            width: 420px;
+                        }
+                        Button { text: root.tr-fetch; clicked => { root.fetch-info(); } }
+                    }
+                    if url-error != "": Text { text: url-error; color: #ef4444; font-size: 12px; }
+                    if video-title != "": Text { text: "Title: " + video-title; color: #22c55e; font-size: 12px; }
+                    Rectangle { height: 1px; background: #2d2d37; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Button { text: root.tr-fetch; clicked => { root.start-analyze(); } }
+                        Text { text: status-msg; color: #a1a1aa; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        height: 8px;
+                        background: #27272a;
+                        border-radius: 4px;
+                        Rectangle {
+                            width: parent.width * progress;
+                            height: 8px;
+                            background: #6366f1;
+                            border-radius: 4px;
+                        }
+                    }
+                    Button { text: "Add moment"; clicked => { root.add-moment(); } }
+                }
+
+                if route == "export": VerticalBox {
+                    Text { text: root.tr-export-title; font-size: 20px; font-weight: 700; color: #ffffff; }
+                    Rectangle { height: 1px; background: #2d2d37; }
+                    Text { text: root.tr-export-desc; color: #a1a1aa; wrap: word-wrap; }
+                }
+
+                if route == "settings": VerticalBox {
+                    Text { text: root.tr-settings; font-size: 20px; font-weight: 700; color: #ffffff; }
+                    Rectangle { height: 1px; background: #2d2d37; }
+                    Text { text: "Dark theme only • Slint native"; color: #a1a1aa; font-size: 12px; }
+                    Button { text: root.tr-settings; clicked => { root.save-settings(); } }
+                    Text { text: status-msg; color: #22c55e; }
+                }
+
+                if route == "keys": VerticalBox {
+                    Text { text: root.tr-keys-title; font-size: 20px; font-weight: 700; color: #ffffff; }
+                    Rectangle { height: 1px; background: #2d2d37; }
+                    Text { text: "Active provider: gemini"; color: #e4e4e7; }
+                    Text { text: "No keys configured."; color: #a1a1aa; }
+                    Text { text: status-msg; color: #a1a1aa; }
+                }
+            }
+        }
+    }
+}
