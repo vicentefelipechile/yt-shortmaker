@@ -3,6 +3,7 @@
 // =================================================================================================
 
 pub mod gemini;
+pub mod openrouter;
 pub mod provider;
 
 pub use provider::{AiProvider, AnalyzeCtx, ProviderCapabilities, ProviderEvent, ProviderRegistry};
@@ -43,6 +44,26 @@ pub fn build_registry(cfg: &AiConfig) -> ProviderRegistry {
                     }
                 } else {
                     gemini::GeminiProvider::new(pcfg)
+                };
+                reg.register(Arc::new(provider))
+            }
+            "openrouter" => {
+                let provider = if id == &cfg.resolved_base_provider() {
+                    if let Some(ref cm) = resolved_custom {
+                        openrouter::OpenRouterProvider::new_with_model(
+                            pcfg,
+                            cm.model_id.clone(),
+                            cm.temperature.or(pcfg.temperature),
+                        )
+                    } else {
+                        openrouter::OpenRouterProvider::new_with_model(
+                            pcfg,
+                            resolved_model.clone(),
+                            pcfg.temperature,
+                        )
+                    }
+                } else {
+                    openrouter::OpenRouterProvider::new(pcfg)
                 };
                 reg.register(Arc::new(provider))
             }

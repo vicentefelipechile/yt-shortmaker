@@ -273,6 +273,7 @@ impl GeminiProvider {
         let mut generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema(),
+            "maxOutputTokens": 16384,
         });
         if let Some(t) = self.temperature {
             generation_config["temperature"] = json!(t);
@@ -407,7 +408,8 @@ fn response_schema() -> serde_json::Value {
         "properties": {
             "moments": {
                 "type": "ARRAY",
-                "description": "List of best moments suitable for YouTube Shorts",
+                "description": "List of best moments suitable for YouTube Shorts (max 5)",
+                "maxItems": 5,
                 "items": {
                     "type": "OBJECT",
                     "properties": {
@@ -432,7 +434,8 @@ fn response_schema() -> serde_json::Value {
                         },
                         "dialogue": {
                             "type": "ARRAY",
-                            "description": "Key spoken phrases within the moment",
+                            "description": "Key spoken phrases within the moment (max 3)",
+                            "maxItems": 3,
                             "items": {
                                 "type": "OBJECT",
                                 "properties": {
@@ -498,10 +501,15 @@ impl AiProvider for GeminiProvider {
         // Error handling tiers:
         // - permanent (400/401/403/404): fail fast
         // - quota (429/RESOURCE_EXHAUSTED): disable key and try next key
-        // - transient (500/502/503/504/UNAVAILABLE/high demand): retry same key with exponential backoff
+        // - transient (500/502/503/504/UNAVAILABLE/high demand/EOF): retry same key with exponential backoff
         const MAX_TRANSIENT_RETRIES: u32 = 3;
         let mut last_err: Option<anyhow::Error> = None;
+        let mut tried: std::collections::HashSet<usize> = std::collections::HashSet::new();
         while let Some(idx) = self.next_key_index() {
+            // Prevent infinite loop with single key + transient (not disabled)
+            if !tried.insert(idx) {
+                break;
+            }
             if ctx.cancellation.is_cancelled() {
                 anyhow::bail!("cancelled");
             }
@@ -592,6 +600,7 @@ fn is_quota_error(e: &anyhow::Error) -> bool {
 fn is_transient_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     // 503 UNAVAILABLE (high demand), 500 INTERNAL, 502/504 gateway — all retryable
+    // also JSON truncation due to MAX_TOKENS (EOF while parsing)
     msg.contains("503")
         || msg.contains("500")
         || msg.contains("502")
@@ -603,6 +612,9 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
         || msg.contains("overloaded")
         || msg.contains("temporarily")
         || msg.contains("try again later")
+        || msg.contains("EOF while parsing")
+        || msg.contains("parsing structured moments json")
+        || msg.contains("MAX_TOKENS")
 }
 
 fn short_error(e: &anyhow::Error) -> String {

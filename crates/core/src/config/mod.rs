@@ -171,6 +171,17 @@ impl Default for AiConfig {
                 media_resolution: None,
             },
         );
+        providers.insert(
+            "openrouter".to_owned(),
+            ProviderConfig {
+                keys: Vec::new(),
+                model: "google/gemini-2.5-flash".to_owned(),
+                model_pro: "google/gemini-2.5-flash".to_owned(),
+                use_fast_model: true,
+                temperature: None,
+                media_resolution: None,
+            },
+        );
         // Defaults verified 2026-08-28 via ai.google.dev/gemini-api/docs/models
         // gemini-3.7-flash is the current stable flagship; gemma models are accessible via the Gemini API.
         let custom_models = vec![
@@ -206,6 +217,15 @@ impl Default for AiConfig {
                 display_name: "Gemma 4 26B (via Gemini API)".to_owned(),
                 base_provider: "gemini".to_owned(),
                 model_id: "gemma-4-26b-a4b-it".to_owned(),
+                temperature: None,
+                media_resolution: None,
+                enabled: true,
+            },
+            CustomModel {
+                id: "openrouter-gemini-2.5-flash".to_owned(),
+                display_name: "Gemini 2.5 Flash (via OpenRouter)".to_owned(),
+                base_provider: "openrouter".to_owned(),
+                model_id: "google/gemini-2.5-flash".to_owned(),
                 temperature: None,
                 media_resolution: None,
                 enabled: true,
@@ -537,7 +557,7 @@ mod tests {
         assert_eq!(cfg.ai.active_provider, "gemini");
         // New extensible model system defaults to gemini-3.7-flash
         assert_eq!(cfg.ai.resolved_model(), "gemini-3.7-flash");
-        assert_eq!(cfg.ai.custom_models.len(), 4);
+        assert_eq!(cfg.ai.custom_models.len(), 5);
         assert!(!cfg.cookies.use_cookies);
     }
 

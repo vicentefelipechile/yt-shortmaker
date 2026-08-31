@@ -1351,6 +1351,15 @@ fn main() -> anyhow::Result<()> {
                     app.set_models_status(format!("{}: {e}", t!("error")).into());
                     return;
                 }
+                // OpenRouter: verify model supports video input
+                if base == "openrouter" {
+                    if let Some(reason) =
+                        yt_shortmaker_core::ai::openrouter::video_support_reason(&model_id_raw)
+                    {
+                        app.set_models_status(format!("{}: {reason}", t!("error")).into());
+                        return;
+                    }
+                }
                 // Ensure base provider exists
                 if !cfg.ai.providers.contains_key(&base) {
                     cfg.ai.providers.insert(

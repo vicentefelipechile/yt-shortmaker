@@ -23,6 +23,7 @@ rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 tracing = "0.1"
 keyring = "3.6"
 async-trait = "0.1"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["full"] }
