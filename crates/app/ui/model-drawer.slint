@@ -1,0 +1,80 @@
+import { SquareButton, SquareChoice, SquareInput } from "./components.slint";
+
+// =========================================================================================================
+// Add model drawer
+// =========================================================================================================
+
+export component ModelDrawer inherits Rectangle {
+    in-out property <string> display-name;
+    in-out property <string> model-id;
+    in-out property <string> base-provider: "gemini";
+    in-out property <string> temperature;
+    in property <string> title: "Add model";
+    in property <string> description: "Add a video-capable model to the shared model list.";
+    in property <string> identity-label: "MODEL IDENTITY";
+    in property <string> provider-label: "PROVIDER";
+    in property <string> display-name-label: "Display name";
+    in property <string> model-id-label: "Model ID";
+    in property <string> base-provider-label: "Base provider";
+    in property <string> temperature-label: "Temperature (0.0-2.0)";
+    in property <string> add-label: "Add model";
+    in property <string> cancel-label: "Cancel";
+    in property <string> status;
+    callback add-model;
+    callback close;
+
+    width: 400px;
+    background: #18181b;
+    border-width: 1px;
+    border-color: #27272a;
+    animate x { duration: 180ms; easing: ease-in-out; }
+
+    TouchArea { }
+    VerticalLayout {
+        padding: 16px;
+        spacing: 0px;
+        Text { text: root.title; color: #ffffff; font-size: 16px; font-weight: 700; height: 26px; }
+        Text { text: root.description; color: #b9bdc5; font-size: 12px; wrap: word-wrap; height: 40px; vertical-alignment: center; }
+        Rectangle { height: 1px; background: #27272a; }
+        Text { text: root.identity-label; color: #818cf8; font-size: 11px; font-weight: 700; height: 34px; vertical-alignment: center; }
+        VerticalLayout {
+            spacing: 6px;
+            height: 72px;
+            Text { text: root.display-name-label; color: #e4e4e7; font-size: 11px; font-weight: 600; height: 18px; }
+            SquareInput { text <=> root.display-name; placeholder-text: "Gemini 3.7 Flash"; }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            height: 72px;
+            Text { text: root.model-id-label; color: #e4e4e7; font-size: 11px; font-weight: 600; height: 18px; }
+            SquareInput { text <=> root.model-id; placeholder-text: "gemini-3.7-flash"; }
+        }
+        Text { text: root.provider-label; color: #818cf8; font-size: 11px; font-weight: 700; height: 34px; vertical-alignment: center; }
+        VerticalLayout {
+            spacing: 6px;
+            height: 72px;
+            Text { text: root.base-provider-label; color: #e4e4e7; font-size: 11px; font-weight: 600; height: 18px; }
+            HorizontalLayout {
+                spacing: 4px;
+                height: 34px;
+                SquareChoice { label: "gemini"; selected: root.base-provider == "gemini"; chosen => { root.base-provider = "gemini"; } }
+            }
+        }
+        VerticalLayout {
+            spacing: 6px;
+            height: 72px;
+            Text { text: root.temperature-label; color: #e4e4e7; font-size: 11px; font-weight: 600; height: 18px; }
+            SquareInput { text <=> root.temperature; placeholder-text: "1.0"; width: 100px; }
+        }
+        Rectangle { vertical-stretch: 1; }
+        Rectangle { height: 1px; background: #27272a; }
+        HorizontalLayout {
+            spacing: 8px;
+            height: 42px;
+            SquareButton { label: root.add-label; primary: true; width: 120px; clicked => { root.add-model(); } }
+            SquareButton { label: root.cancel-label; width: 100px; clicked => { root.close(); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Text { text: root.status; color: #c3c6cc; font-size: 11px; wrap: word-wrap; height: 28px; vertical-alignment: center; }
+    }
+}

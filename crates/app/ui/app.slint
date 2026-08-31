@@ -1,180 +1,7 @@
 import { ScrollView } from "std-widgets.slint";
+import { ModelDrawer } from "./model-drawer.slint";
+import { NavItem, SquareButton, SquareChoice, SquareInput, SquareToggle } from "./components.slint";
 
-// =========================================================================================================
-// Shared UI Components
-// =========================================================================================================
-
-component SquareButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> primary: false;
-    callback clicked;
-    height: 34px;
-    min-width: 90px;
-    background: primary ? #0878c9 : #252629;
-    border-width: 1px;
-    border-color: primary ? #0878c9 : #3a3c42;
-
-    states [
-        hover when touch.has-hover : {
-            background: primary ? #0a8be4 : #303237;
-        }
-    ]
-
-    Text {
-        width: parent.width;
-        height: parent.height;
-        text: root.label;
-        color: #f4f4f5;
-        font-size: 13px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
-
-component SquareInput inherits Rectangle {
-    in-out property <string> text;
-    in property <string> placeholder-text: "";
-    in property <bool> password: false;
-    height: 34px;
-    background: #202124;
-    border-width: 1px;
-    border-color: #3d4149;
-
-    if root.text == "": Text {
-        x: 11px;
-        width: parent.width - 22px;
-        height: parent.height;
-        text: root.placeholder-text;
-        color: #858b96;
-        font-size: 13px;
-        vertical-alignment: center;
-    }
-
-    if root.password: TextInput {
-        x: 11px;
-        width: parent.width - 22px;
-        height: parent.height;
-        text <=> root.text;
-        color: #f4f4f5;
-        font-size: 13px;
-        vertical-alignment: center;
-        input-type: InputType.password;
-    }
-
-    if !root.password: TextInput {
-        x: 11px;
-        width: parent.width - 22px;
-        height: parent.height;
-        text <=> root.text;
-        color: #f4f4f5;
-        font-size: 13px;
-        vertical-alignment: center;
-    }
-}
-
-component SquareChoice inherits Rectangle {
-    in property <string> label;
-    in property <bool> selected: false;
-    callback chosen;
-    width: 132px;
-    height: 32px;
-    background: selected ? #2a2a2e : #202124;
-    border-width: 1px;
-    border-color: selected ? #6366f1 : #3d4149;
-
-    Text {
-        width: parent.width;
-        height: parent.height;
-        text: root.label;
-        color: selected ? #ffffff : #b7bbc3;
-        font-size: 12px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        clicked => { root.chosen(); }
-    }
-}
-
-component SquareToggle inherits Rectangle {
-    in property <string> label;
-    in-out property <bool> checked: false;
-    callback toggled;
-    height: 26px;
-
-    Rectangle {
-        x: 0px;
-        y: 4px;
-        width: 18px;
-        height: 18px;
-        background: root.checked ? #6366f1 : #202124;
-        border-width: 1px;
-        border-color: root.checked ? #6366f1 : #555a64;
-        if root.checked: Text {
-            width: parent.width;
-            height: parent.height;
-            text: "x";
-            color: #ffffff;
-            font-size: 12px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
-
-    Text {
-        x: 28px;
-        width: parent.width - 28px;
-        height: parent.height;
-        text: root.label;
-        color: #d4d4d8;
-        font-size: 13px;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        clicked => {
-            root.checked = !root.checked;
-            root.toggled();
-        }
-    }
-}
-
-component NavItem inherits Rectangle {
-    in property <string> label;
-    in property <bool> active;
-    callback clicked;
-    height: 32px;
-    background: active ? #2a2a2e : transparent;
-
-    if active: Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 2px;
-        height: parent.height;
-        background: #6366f1;
-    }
-
-    Text {
-        x: 14px;
-        width: parent.width - 14px;
-        height: parent.height;
-        text: root.label;
-        color: active ? #ffffff : #a1a1aa;
-        font-size: 13px;
-        font-weight: active ? 600 : 400;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-}
 
 struct KeyRow {
     name: string,
@@ -286,6 +113,12 @@ export component MainWindow inherits Window {
     in property <string> tr-model-display-name: "Display name";
     in property <string> tr-model-id-label: "Model ID";
     in property <string> tr-model-base: "Base provider";
+    in property <string> tr-model-drawer-title: "Add model";
+    in property <string> tr-model-drawer-description: "Add a video-capable model to the shared model list.";
+    in property <string> tr-model-identity: "MODEL IDENTITY";
+    in property <string> tr-model-provider: "PROVIDER";
+    in property <string> tr-model-temperature: "Temperature (0.0-2.0)";
+    in property <string> tr-cancel: "Cancel";
     in property <string> tr-add-model: "Add model";
     in property <string> tr-select-model: "Select";
     in property <string> tr-delete-model: "Delete";
@@ -851,37 +684,25 @@ export component MainWindow inherits Window {
             opacity: 0.45;
             TouchArea { clicked => { root.close-model-drawer(); } }
         }
-        if root.show-model-drawer: Rectangle {
+        if root.show-model-drawer: ModelDrawer {
             x: parent.width - 400px;
-            width: 400px;
             height: parent.height;
-            background: #18181b;
-            border-width: 1px;
-            border-color: #27272a;
-            animate x { duration: 180ms; easing: ease-in-out; }
-            TouchArea { }
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-                Text { text: "Añadir Modelo"; color: #ffffff; font-size: 14px; font-weight: 700; }
-                Text { text: root.tr-ai-description; color: #b9bdc5; font-size: 11px; wrap: word-wrap; }
-                Text { text: root.tr-model-display-name; color: #e4e4e7; font-size: 11px; font-weight: 600; }
-                SquareInput { text <=> root.new-model-display-name; placeholder-text: "Gemini 3.7 Flash"; }
-                Text { text: root.tr-model-id-label; color: #e4e4e7; font-size: 11px; font-weight: 600; }
-                SquareInput { text <=> root.new-model-id; placeholder-text: "gemini-3.7-flash"; }
-                Text { text: root.tr-model-base; color: #e4e4e7; font-size: 11px; font-weight: 600; }
-                HorizontalLayout {
-                    spacing: 4px;
-                    SquareChoice { label: "gemini"; selected: root.new-model-base == "gemini"; chosen => { root.new-model-base = "gemini"; } }
-                }
-                Text { text: "Temperature (0.0-2.0)"; color: #e4e4e7; font-size: 11px; font-weight: 600; }
-                SquareInput { text <=> root.new-model-temp; placeholder-text: "1.0"; width: 100px; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    SquareButton { label: root.tr-add-model; primary: true; width: 110px; clicked => { root.add-model(); } }
-                    SquareButton { label: "Cancelar"; width: 110px; clicked => { root.close-model-drawer(); } }
-                }
-                Text { text: root.models-status; color: #c3c6cc; font-size: 11px; wrap: word-wrap; }
-            }
+            display-name <=> root.new-model-display-name;
+            model-id <=> root.new-model-id;
+            base-provider <=> root.new-model-base;
+            temperature <=> root.new-model-temp;
+            title: root.tr-model-drawer-title;
+            description: root.tr-model-drawer-description;
+            identity-label: root.tr-model-identity;
+            provider-label: root.tr-model-provider;
+            display-name-label: root.tr-model-display-name;
+            model-id-label: root.tr-model-id-label;
+            base-provider-label: root.tr-model-base;
+            temperature-label: root.tr-model-temperature;
+            add-label: root.tr-add-model;
+            cancel-label: root.tr-cancel;
+            status: root.models-status;
+            add-model => { root.add-model(); }
+            close => { root.close-model-drawer(); }
         }
 }

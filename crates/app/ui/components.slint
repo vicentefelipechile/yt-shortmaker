@@ -1,0 +1,175 @@
+// =========================================================================================================
+// Shared square UI components
+// =========================================================================================================
+
+export component SquareButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 34px;
+    min-width: 90px;
+    background: primary ? #0878c9 : #252629;
+    border-width: 1px;
+    border-color: primary ? #0878c9 : #3a3c42;
+
+    states [
+        hover when touch.has-hover : {
+            background: primary ? #0a8be4 : #303237;
+        }
+    ]
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: #f4f4f5;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SquareInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text: "";
+    in property <bool> password: false;
+    height: 34px;
+    background: #202124;
+    border-width: 1px;
+    border-color: #3d4149;
+
+    if root.text == "": Text {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text: root.placeholder-text;
+        color: #858b96;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    if root.password: TextInput {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text <=> root.text;
+        color: #f4f4f5;
+        font-size: 13px;
+        vertical-alignment: center;
+        input-type: InputType.password;
+    }
+
+    if !root.password: TextInput {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text <=> root.text;
+        color: #f4f4f5;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+}
+
+export component SquareChoice inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback chosen;
+    width: 132px;
+    height: 32px;
+    background: selected ? #2a2a2e : #202124;
+    border-width: 1px;
+    border-color: selected ? #6366f1 : #3d4149;
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: selected ? #ffffff : #b7bbc3;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.chosen(); }
+    }
+}
+
+export component SquareToggle inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked: false;
+    callback toggled;
+    height: 26px;
+
+    Rectangle {
+        x: 0px;
+        y: 4px;
+        width: 18px;
+        height: 18px;
+        background: root.checked ? #6366f1 : #202124;
+        border-width: 1px;
+        border-color: root.checked ? #6366f1 : #555a64;
+        if root.checked: Text {
+            width: parent.width;
+            height: parent.height;
+            text: "x";
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 28px;
+        width: parent.width - 28px;
+        height: parent.height;
+        text: root.label;
+        color: #d4d4d8;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+export component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    height: 32px;
+    background: active ? #2a2a2e : transparent;
+
+    if active: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 2px;
+        height: parent.height;
+        background: #6366f1;
+    }
+
+    Text {
+        x: 14px;
+        width: parent.width - 14px;
+        height: parent.height;
+        text: root.label;
+        color: active ? #ffffff : #a1a1aa;
+        font-size: 13px;
+        font-weight: active ? 600 : 400;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}

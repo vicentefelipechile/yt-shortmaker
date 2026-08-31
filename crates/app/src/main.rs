@@ -96,6 +96,12 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_model_display_name(t!("model_display_name").to_string().into());
     app.set_tr_model_id_label(t!("model_id_label").to_string().into());
     app.set_tr_model_base(t!("model_base_provider").to_string().into());
+    app.set_tr_model_drawer_title(t!("model_drawer_title").to_string().into());
+    app.set_tr_model_drawer_description(t!("model_drawer_description").to_string().into());
+    app.set_tr_model_identity(t!("model_identity").to_string().into());
+    app.set_tr_model_provider(t!("model_provider").to_string().into());
+    app.set_tr_model_temperature(t!("model_temperature").to_string().into());
+    app.set_tr_cancel(t!("cancel").to_string().into());
     app.set_tr_add_model(t!("add_model").to_string().into());
     app.set_tr_select_model(t!("select_model").to_string().into());
     app.set_tr_delete_model(t!("delete_model").to_string().into());
