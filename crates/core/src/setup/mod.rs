@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Context, Result};
+use rust_i18n::t;
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
@@ -210,27 +211,33 @@ where
         "ensure_tools: missing {:?}, starting auto-install",
         status.missing()
     );
-    on_progress(format!("Instalando {}...", status.missing().join(", ")));
+    on_progress(
+        t!(
+            "setup_progress_installing",
+            deps = status.missing().join(", ")
+        )
+        .to_string(),
+    );
 
     if !status.ytdlp {
-        on_progress("Descargando yt-dlp...".to_string());
+        on_progress(t!("setup_progress_downloading_ytdlp").to_string());
         ensure_yt_dlp(on_progress)
             .await
             .with_context(|| "auto-installing yt-dlp")?;
-        on_progress("yt-dlp listo".to_string());
+        on_progress(t!("setup_progress_ytdlp_ready").to_string());
     }
     if !dependency_status().ffmpeg || !dependency_status().ffprobe {
-        on_progress("Instalando ffmpeg...".to_string());
+        on_progress(t!("setup_progress_installing_ffmpeg").to_string());
         ensure_ffmpeg(on_progress)
             .await
             .with_context(|| "auto-installing ffmpeg/ffprobe")?;
-        on_progress("ffmpeg listo".to_string());
+        on_progress(t!("setup_progress_ffmpeg_ready").to_string());
     }
 
     let after = dependency_status();
     if after.is_ok() {
         tracing::info!("ensure_tools: all tools now available");
-        on_progress("Herramientas listas".to_string());
+        on_progress(t!("setup_progress_tools_ready").to_string());
         return Ok(());
     }
     Err(anyhow!(format_missing_message(&after.missing())))
@@ -326,7 +333,7 @@ async fn ensure_ffmpeg_windows<F>(on_progress: &F) -> Result<()>
 where
     F: Fn(String) + Send,
 {
-    on_progress("Intentando instalar ffmpeg vía winget...".to_string());
+    on_progress(t!("setup_progress_trying_winget").to_string());
     if try_winget_install("Gyan.FFmpeg").await {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if dependency_status().ffmpeg && dependency_status().ffprobe {
@@ -336,7 +343,7 @@ where
         tracing::warn!("winget reported success but ffmpeg still not in PATH");
     }
     // Fallback: download ffmpeg zip directly (automatic, no user action)
-    on_progress("Descargando ffmpeg (esto puede tardar)...".to_string());
+    on_progress(t!("setup_progress_downloading_ffmpeg").to_string());
     let dir = tools_dir()?;
     let zip_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
     let zip_path = dir.join("ffmpeg.zip");
@@ -344,7 +351,7 @@ where
     download_file_with_progress(zip_url, &zip_path, on_progress)
         .await
         .context("downloading ffmpeg zip")?;
-    on_progress("Extrayendo ffmpeg...".to_string());
+    on_progress(t!("setup_progress_extracting_ffmpeg").to_string());
     extract_ffmpeg_zip(&zip_path, &dir)
         .await
         .context("extracting ffmpeg zip")?;
@@ -392,7 +399,7 @@ async fn ensure_ffmpeg_macos<F>(on_progress: &F) -> Result<()>
 where
     F: Fn(String) + Send,
 {
-    on_progress("Instalando ffmpeg vía brew...".to_string());
+    on_progress(t!("setup_progress_installing_brew").to_string());
     if try_brew_install("ffmpeg").await {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if dependency_status().ffmpeg {
@@ -488,14 +495,20 @@ where
             buf.extend_from_slice(&chunk);
             downloaded += chunk.len() as u64;
             if total > 0 {
-                let pct = downloaded * 100 / total;
-                if pct != last_pct && pct % 10 == 0 {
-                    last_pct = pct;
-                    on_progress(format!("Descargando... {pct}%"));
-                    tracing::info!("download {pct}% {downloaded}/{total}");
+                if let Some(pct) = downloaded
+                    .checked_mul(100)
+                    .and_then(|v| v.checked_div(total))
+                {
+                    if pct != last_pct && pct % 10 == 0 {
+                        last_pct = pct;
+                        on_progress(t!("setup_progress_downloading_pct", pct = pct).to_string());
+                        tracing::info!("download {pct}% {downloaded}/{total}");
+                    }
                 }
             } else if downloaded % (512 * 1024) == 0 {
-                on_progress(format!("Descargando... {} KB", downloaded / 1024));
+                on_progress(
+                    t!("setup_progress_downloading_kb", kb = downloaded / 1024).to_string(),
+                );
             }
         }
         buf

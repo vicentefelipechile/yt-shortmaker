@@ -7371,6 +7371,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rust-i18n",
  "serde",
  "serde_json",
  "tempfile",
