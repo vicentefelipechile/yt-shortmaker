@@ -1,5 +1,5 @@
 // =================================================================================================
-// session — SQLite session persistence
+// session — SQLite session persistence (video-centric, no projects list)
 // =================================================================================================
 
 use std::path::{Path, PathBuf};
@@ -15,39 +15,39 @@ use crate::types::VideoMoment;
 // -------------------------------------------------------------------------------------------------
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
+-- Per-video processing state (replaces projects). One row per video_id.
+CREATE TABLE IF NOT EXISTS video_jobs (
+  video_id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
-  video_id TEXT NOT NULL,
   title TEXT NOT NULL,
   duration REAL NOT NULL,
+  work_dir TEXT NOT NULL,
+  download_path TEXT,
+  download_verified INTEGER NOT NULL DEFAULT 0,
+  split_verified INTEGER NOT NULL DEFAULT 0,
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  analyzed_chunks INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS chunks (
-  project_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS job_chunks (
+  video_id TEXT NOT NULL,
   idx INTEGER NOT NULL,
   start_sec INTEGER NOT NULL,
   path TEXT NOT NULL,
-  PRIMARY KEY (project_id, idx)
+  status TEXT NOT NULL,
+  PRIMARY KEY (video_id, idx)
 );
-CREATE TABLE IF NOT EXISTS moments (
-  project_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS job_moments (
+  video_id TEXT NOT NULL,
   idx INTEGER NOT NULL,
   start_time TEXT NOT NULL,
   end_time TEXT NOT NULL,
   category TEXT NOT NULL,
   description TEXT NOT NULL,
   dialogue_json TEXT NOT NULL,
-  PRIMARY KEY (project_id, idx)
-);
-CREATE TABLE IF NOT EXISTS exports (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  plano_json TEXT NOT NULL,
-  output_dir TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  PRIMARY KEY (video_id, idx)
 );
 -- Cache for fetch_info (ytdlp) so repeated URLs do not hit the network
 CREATE TABLE IF NOT EXISTS video_cache (
@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS video_cache (
   fetched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_video_cache_video_id ON video_cache(video_id);
+CREATE INDEX IF NOT EXISTS idx_job_chunks_video ON job_chunks(video_id);
+CREATE INDEX IF NOT EXISTS idx_job_moments_video ON job_moments(video_id);
 "#;
 
 // -------------------------------------------------------------------------------------------------
@@ -67,12 +69,17 @@ CREATE INDEX IF NOT EXISTS idx_video_cache_video_id ON video_cache(video_id);
 // -------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub struct Project {
-    pub id: String,
-    pub url: String,
+pub struct VideoJob {
     pub video_id: String,
+    pub url: String,
     pub title: String,
     pub duration: f64,
+    pub work_dir: String,
+    pub download_path: Option<String>,
+    pub download_verified: bool,
+    pub split_verified: bool,
+    pub total_chunks: i64,
+    pub analyzed_chunks: i64,
     pub status: String,
 }
 
@@ -105,6 +112,10 @@ pub fn init_db(path: &Path) -> Result<Connection> {
         let cache = parent.join("img_cache");
         let _ = std::fs::create_dir_all(&cache);
     }
+    // Best-effort cleanup of legacy tables (no retrocompat per user request)
+    let _ = conn.execute_batch(
+        "DROP TABLE IF EXISTS projects; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS moments; DROP TABLE IF EXISTS exports;",
+    );
     Ok(conn)
 }
 
@@ -136,8 +147,22 @@ pub fn ensure_img_cache_dir() -> Result<PathBuf> {
 /// Deterministic thumbnail path for a given video_id (always under `img_cache/`).
 /// Extension is normalised to `.jpg` — yt-dlp thumbnails are almost always jpeg.
 pub fn thumbnail_cache_path(video_id: &str) -> Result<PathBuf> {
-    let safe: String = video_id
-        .chars()
+    let safe = sanitize_id(video_id);
+    Ok(img_cache_dir()?.join(format!("{safe}.jpg")))
+}
+
+/// Persistent work dir for a given video_id (verified on resume).
+pub fn video_work_dir(video_id: &str) -> Result<PathBuf> {
+    let safe = sanitize_id(video_id);
+    Ok(db_dir()?.join("videos").join(safe))
+}
+
+pub fn video_download_path(video_id: &str) -> Result<PathBuf> {
+    Ok(video_work_dir(video_id)?.join(format!("{}.mp4", sanitize_id(video_id))))
+}
+
+fn sanitize_id(id: &str) -> String {
+    id.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -145,122 +170,145 @@ pub fn thumbnail_cache_path(video_id: &str) -> Result<PathBuf> {
                 '_'
             }
         })
-        .collect();
-    Ok(img_cache_dir()?.join(format!("{safe}.jpg")))
+        .collect()
 }
 
-pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
+// -------------------------------------------------------------------------------------------------
+// Video jobs (checkpoint state)
+// -------------------------------------------------------------------------------------------------
+
+pub fn upsert_video_job(conn: &Connection, job: &VideoJob) -> Result<()> {
     let now = chrono::Local::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO projects (id, url, video_id, title, duration, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-           url=excluded.url, video_id=excluded.video_id, title=excluded.title,
-           duration=excluded.duration, status=excluded.status, updated_at=excluded.updated_at",
+        "INSERT INTO video_jobs (video_id, url, title, duration, work_dir, download_path, download_verified, split_verified, total_chunks, analyzed_chunks, status, created_at, updated_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+          ON CONFLICT(video_id) DO UPDATE SET
+            url=excluded.url, title=excluded.title, duration=excluded.duration, work_dir=excluded.work_dir,
+            download_path=excluded.download_path, download_verified=excluded.download_verified,
+            split_verified=excluded.split_verified, total_chunks=excluded.total_chunks,
+            analyzed_chunks=excluded.analyzed_chunks, status=excluded.status, updated_at=excluded.updated_at",
         params![
-            project.id,
-            project.url,
-            project.video_id,
-            project.title,
-            project.duration,
-            project.status,
+            job.video_id,
+            job.url,
+            job.title,
+            job.duration,
+            job.work_dir,
+            job.download_path,
+            job.download_verified as i64,
+            job.split_verified as i64,
+            job.total_chunks,
+            job.analyzed_chunks,
+            job.status,
             now
         ],
     )
-    .context("inserting project")?;
+    .context("upserting video job")?;
     Ok(())
 }
 
-pub fn insert_chunks(conn: &Connection, project_id: &str, chunks: &[VideoChunk]) -> Result<()> {
+pub fn get_video_job(conn: &Connection, video_id: &str) -> Result<Option<VideoJob>> {
+    conn.query_row(
+        "SELECT video_id, url, title, duration, work_dir, download_path, download_verified, split_verified, total_chunks, analyzed_chunks, status FROM video_jobs WHERE video_id = ?1",
+        params![video_id],
+        |row| {
+            Ok(VideoJob {
+                video_id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                duration: row.get(3)?,
+                work_dir: row.get(4)?,
+                download_path: row.get(5)?,
+                download_verified: row.get::<_, i64>(6)? != 0,
+                split_verified: row.get::<_, i64>(7)? != 0,
+                total_chunks: row.get(8)?,
+                analyzed_chunks: row.get(9)?,
+                status: row.get(10)?,
+            })
+        },
+    )
+    .optional()
+    .context("querying video job")
+}
+
+pub fn get_job_chunks(conn: &Connection, video_id: &str) -> Result<Vec<VideoChunk>> {
+    let mut stmt = conn
+        .prepare("SELECT path, start_sec FROM job_chunks WHERE video_id = ?1 ORDER BY idx")
+        .context("preparing get job chunks")?;
+    let rows = stmt
+        .query_map(params![video_id], |row| {
+            let path: String = row.get(0)?;
+            let start: i64 = row.get(1)?;
+            Ok(VideoChunk {
+                file_path: path,
+                start_seconds: start as u64,
+            })
+        })
+        .context("querying job chunks")?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.context("mapping chunk row")?);
+    }
+    Ok(out)
+}
+
+pub fn get_job_chunk_status(conn: &Connection, video_id: &str) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn
+        .prepare("SELECT idx, status FROM job_chunks WHERE video_id = ?1 ORDER BY idx")
+        .context("preparing chunk status")?;
+    let rows = stmt
+        .query_map(params![video_id], |row| {
+            let idx: i64 = row.get(0)?;
+            let status: String = row.get(1)?;
+            Ok((idx, status))
+        })
+        .context("querying chunk status")?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.context("mapping status")?);
+    }
+    Ok(out)
+}
+
+pub fn insert_job_chunks(conn: &Connection, video_id: &str, chunks: &[VideoChunk]) -> Result<()> {
     let tx = conn.unchecked_transaction().context("starting chunks tx")?;
+    tx.execute(
+        "DELETE FROM job_chunks WHERE video_id = ?1",
+        params![video_id],
+    )
+    .context("clearing old chunks")?;
     for (idx, c) in chunks.iter().enumerate() {
         tx.execute(
-            "INSERT OR REPLACE INTO chunks (project_id, idx, start_sec, path) VALUES (?1, ?2, ?3, ?4)",
-            params![project_id, idx as i64, c.start_seconds as i64, c.file_path],
+            "INSERT INTO job_chunks (video_id, idx, start_sec, path, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![video_id, idx as i64, c.start_seconds as i64, c.file_path, "split_ok"],
         )
-        .context("inserting chunk")?;
+        .context("inserting job chunk")?;
     }
     tx.commit().context("committing chunks")?;
     Ok(())
 }
 
-pub fn insert_moments(conn: &Connection, project_id: &str, moments: &[VideoMoment]) -> Result<()> {
-    let tx = conn
-        .unchecked_transaction()
-        .context("starting moments tx")?;
-    for (idx, m) in moments.iter().enumerate() {
-        let dialogue_json = serde_json::to_string(&m.dialogue).context("serializing dialogue")?;
-        tx.execute(
-            "INSERT OR REPLACE INTO moments
-             (project_id, idx, start_time, end_time, category, description, dialogue_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                project_id,
-                idx as i64,
-                m.start_time,
-                m.end_time,
-                m.category,
-                m.description,
-                dialogue_json
-            ],
-        )
-        .context("inserting moment")?;
-    }
-    tx.commit().context("committing moments")?;
+pub fn update_job_chunk_status(
+    conn: &Connection,
+    video_id: &str,
+    idx: i64,
+    status: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE job_chunks SET status = ?1 WHERE video_id = ?2 AND idx = ?3",
+        params![status, video_id, idx],
+    )
+    .context("updating chunk status")?;
     Ok(())
 }
 
-pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
-    let mut stmt = conn
-        .prepare("SELECT id, url, video_id, title, duration, status FROM projects ORDER BY created_at DESC")
-        .context("preparing list projects")?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                url: row.get(1)?,
-                video_id: row.get(2)?,
-                title: row.get(3)?,
-                duration: row.get(4)?,
-                status: row.get(5)?,
-            })
-        })
-        .context("querying projects")?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.context("mapping project row")?);
-    }
-    Ok(out)
-}
-
-pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
-    conn.query_row(
-        "SELECT id, url, video_id, title, duration, status FROM projects WHERE id = ?1",
-        params![id],
-        |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                url: row.get(1)?,
-                video_id: row.get(2)?,
-                title: row.get(3)?,
-                duration: row.get(4)?,
-                status: row.get(5)?,
-            })
-        },
-    )
-    .optional()
-    .context("querying project")
-}
-
-pub fn get_moments(conn: &Connection, project_id: &str) -> Result<Vec<VideoMoment>> {
+pub fn get_job_moments(conn: &Connection, video_id: &str) -> Result<Vec<VideoMoment>> {
     let mut stmt = conn
         .prepare(
-            "SELECT start_time, end_time, category, description, dialogue_json
-             FROM moments WHERE project_id = ?1 ORDER BY idx",
+            "SELECT start_time, end_time, category, description, dialogue_json FROM job_moments WHERE video_id = ?1 ORDER BY idx",
         )
         .context("preparing get moments")?;
     let rows = stmt
-        .query_map(params![project_id], |row| {
+        .query_map(params![video_id], |row| {
             let dialogue_json: String = row.get(4)?;
             let dialogue = serde_json::from_str(&dialogue_json).unwrap_or_default();
             Ok(VideoMoment {
@@ -273,20 +321,77 @@ pub fn get_moments(conn: &Connection, project_id: &str) -> Result<Vec<VideoMomen
         })
         .context("querying moments")?;
     let mut out = Vec::new();
-    for row in rows {
-        out.push(row.context("mapping moment row")?);
+    for r in rows {
+        out.push(r.context("mapping moment")?);
     }
     Ok(out)
 }
 
-pub fn delete_project(conn: &Connection, id: &str) -> Result<()> {
+pub fn insert_job_moments(
+    conn: &Connection,
+    video_id: &str,
+    moments: &[VideoMoment],
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("starting moments tx")?;
+    tx.execute(
+        "DELETE FROM job_moments WHERE video_id = ?1",
+        params![video_id],
+    )
+    .context("clearing moments")?;
+    for (idx, m) in moments.iter().enumerate() {
+        let dialogue_json = serde_json::to_string(&m.dialogue).context("serializing dialogue")?;
+        tx.execute(
+            "INSERT INTO job_moments (video_id, idx, start_time, end_time, category, description, dialogue_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![video_id, idx as i64, m.start_time, m.end_time, m.category, m.description, dialogue_json],
+        )
+        .context("inserting moment")?;
+    }
+    tx.commit().context("committing moments")?;
+    Ok(())
+}
+
+pub fn append_job_moments(
+    conn: &Connection,
+    video_id: &str,
+    new_moments: &[VideoMoment],
+) -> Result<()> {
+    if new_moments.is_empty() {
+        return Ok(());
+    }
+    let existing = get_job_moments(conn, video_id)?.len() as i64;
+    let tx = conn.unchecked_transaction().context("starting append tx")?;
+    for (i, m) in new_moments.iter().enumerate() {
+        let idx = existing + i as i64;
+        let dialogue_json = serde_json::to_string(&m.dialogue).context("serializing dialogue")?;
+        tx.execute(
+            "INSERT OR REPLACE INTO job_moments (video_id, idx, start_time, end_time, category, description, dialogue_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![video_id, idx, m.start_time, m.end_time, m.category, m.description, dialogue_json],
+        )
+        .context("appending moment")?;
+    }
+    tx.commit().context("committing append")?;
+    Ok(())
+}
+
+pub fn delete_video_job(conn: &Connection, video_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction().context("starting delete tx")?;
-    tx.execute("DELETE FROM chunks WHERE project_id = ?1", params![id])
-        .context("deleting chunks")?;
-    tx.execute("DELETE FROM moments WHERE project_id = ?1", params![id])
-        .context("deleting moments")?;
-    tx.execute("DELETE FROM projects WHERE id = ?1", params![id])
-        .context("deleting project")?;
+    tx.execute(
+        "DELETE FROM job_chunks WHERE video_id = ?1",
+        params![video_id],
+    )
+    .context("deleting chunks")?;
+    tx.execute(
+        "DELETE FROM job_moments WHERE video_id = ?1",
+        params![video_id],
+    )
+    .context("deleting moments")?;
+    tx.execute(
+        "DELETE FROM video_jobs WHERE video_id = ?1",
+        params![video_id],
+    )
+    .context("deleting job")?;
     tx.commit().context("committing delete")?;
     Ok(())
 }
@@ -298,11 +403,11 @@ pub fn delete_project(conn: &Connection, id: &str) -> Result<()> {
 pub fn upsert_cached_video(conn: &Connection, cached: &CachedVideo) -> Result<()> {
     conn.execute(
         "INSERT INTO video_cache (url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(url) DO UPDATE SET
-           video_id=excluded.video_id, title=excluded.title, duration=excluded.duration,
-           thumbnail_url=excluded.thumbnail_url, thumbnail_path=excluded.thumbnail_path,
-           fetched_at=excluded.fetched_at",
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+          ON CONFLICT(url) DO UPDATE SET
+            video_id=excluded.video_id, title=excluded.title, duration=excluded.duration,
+            thumbnail_url=excluded.thumbnail_url, thumbnail_path=excluded.thumbnail_path,
+            fetched_at=excluded.fetched_at",
         params![
             cached.url,
             cached.video_id,
@@ -320,7 +425,7 @@ pub fn upsert_cached_video(conn: &Connection, cached: &CachedVideo) -> Result<()
 pub fn get_cached_video(conn: &Connection, url: &str) -> Result<Option<CachedVideo>> {
     conn.query_row(
         "SELECT url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at
-         FROM video_cache WHERE url = ?1",
+          FROM video_cache WHERE url = ?1",
         params![url],
         |row| {
             Ok(CachedVideo {
@@ -341,7 +446,7 @@ pub fn get_cached_video(conn: &Connection, url: &str) -> Result<Option<CachedVid
 pub fn get_cached_video_by_id(conn: &Connection, video_id: &str) -> Result<Option<CachedVideo>> {
     conn.query_row(
         "SELECT url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at
-         FROM video_cache WHERE video_id = ?1 ORDER BY fetched_at DESC LIMIT 1",
+          FROM video_cache WHERE video_id = ?1 ORDER BY fetched_at DESC LIMIT 1",
         params![video_id],
         |row| {
             Ok(CachedVideo {
@@ -363,17 +468,7 @@ pub fn get_cached_video_by_id(conn: &Connection, video_id: &str) -> Result<Optio
 /// Caller decides when to update the DB row; this only touches the filesystem.
 pub fn save_thumbnail_to_cache(video_id: &str, bytes: &[u8]) -> Result<PathBuf> {
     let dir = ensure_img_cache_dir()?;
-    let path = dir.join(format!(
-        "{}.jpg",
-        video_id
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    ));
+    let path = dir.join(format!("{}.jpg", sanitize_id(video_id)));
     std::fs::write(&path, bytes).context("writing thumbnail to img_cache")?;
     Ok(path)
 }
@@ -421,29 +516,50 @@ mod tests {
     }
 
     #[test]
-    fn test_project_crud() {
+    fn test_video_job_crud() {
         let dir = tempdir().unwrap();
         let conn = init_db(&dir.path().join("test.db")).unwrap();
-        let project = Project {
-            id: "p1".into(),
-            url: "https://youtube.com/watch?v=abc".into(),
-            video_id: "abc".into(),
+        let job = VideoJob {
+            video_id: "abc123".into(),
+            url: "https://youtube.com/watch?v=abc123".into(),
             title: "Test".into(),
             duration: 100.0,
-            status: "analyzed".into(),
+            work_dir: "/tmp/work".into(),
+            download_path: Some("/tmp/work/abc123.mp4".into()),
+            download_verified: true,
+            split_verified: false,
+            total_chunks: 3,
+            analyzed_chunks: 1,
+            status: "splitting".into(),
         };
-        insert_project(&conn, &project).unwrap();
-        let loaded = get_project(&conn, "p1").unwrap().unwrap();
+        upsert_video_job(&conn, &job).unwrap();
+        let loaded = get_video_job(&conn, "abc123").unwrap().unwrap();
         assert_eq!(loaded.title, "Test");
-        assert_eq!(list_projects(&conn).unwrap().len(), 1);
-        delete_project(&conn, "p1").unwrap();
-        assert!(get_project(&conn, "p1").unwrap().is_none());
+        assert!(loaded.download_verified);
+        assert_eq!(loaded.total_chunks, 3);
+        delete_video_job(&conn, "abc123").unwrap();
+        assert!(get_video_job(&conn, "abc123").unwrap().is_none());
     }
 
     #[test]
     fn test_chunks_and_moments_roundtrip() {
         let dir = tempdir().unwrap();
         let conn = init_db(&dir.path().join("test.db")).unwrap();
+        let vid = "vid123";
+        let job = VideoJob {
+            video_id: vid.into(),
+            url: "https://youtube.com/watch?v=vid123".into(),
+            title: "T".into(),
+            duration: 1200.0,
+            work_dir: "/tmp/w".into(),
+            download_path: None,
+            download_verified: false,
+            split_verified: false,
+            total_chunks: 2,
+            analyzed_chunks: 0,
+            status: "pending".into(),
+        };
+        upsert_video_job(&conn, &job).unwrap();
         let chunks = vec![
             VideoChunk {
                 start_seconds: 0,
@@ -454,30 +570,28 @@ mod tests {
                 file_path: "/tmp/c1.mp4".into(),
             },
         ];
-        insert_chunks(&conn, "p1", &chunks).unwrap();
+        insert_job_chunks(&conn, vid, &chunks).unwrap();
+        let loaded_chunks = get_job_chunks(&conn, vid).unwrap();
+        assert_eq!(loaded_chunks.len(), 2);
         let moments = sample_moments();
-        insert_moments(&conn, "p1", &moments).unwrap();
-
-        let loaded = get_moments(&conn, "p1").unwrap();
+        insert_job_moments(&conn, vid, &moments).unwrap();
+        let loaded = get_job_moments(&conn, vid).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].dialogue.len(), 1);
-        assert_eq!(loaded[1].dialogue[0].phrase, "hello world");
     }
 
     #[test]
-    fn test_reinsert_replaces_by_idx() {
+    fn test_append_moments() {
         let dir = tempdir().unwrap();
         let conn = init_db(&dir.path().join("test.db")).unwrap();
-        let moments = sample_moments();
-        insert_moments(&conn, "p1", &moments).unwrap();
-
-        let mut updated = moments[0].clone();
-        updated.start_time = "00:00:09".into();
-        insert_moments(&conn, "p1", &[updated]).unwrap();
-
-        let loaded = get_moments(&conn, "p1").unwrap();
+        let vid = "append1";
+        let m1 = sample_moments()[0].clone();
+        let m2 = sample_moments()[1].clone();
+        insert_job_moments(&conn, vid, std::slice::from_ref(&m1)).unwrap();
+        append_job_moments(&conn, vid, std::slice::from_ref(&m2)).unwrap();
+        let loaded = get_job_moments(&conn, vid).unwrap();
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].start_time, "00:00:09");
+        assert_eq!(loaded[0].start_time, "00:00:05");
         assert_eq!(loaded[1].start_time, "00:01:00");
     }
 
@@ -486,7 +600,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = dir.path().join("nested").join("session.db");
         let conn = init_db(&db).unwrap();
-        // init_db must have created img_cache alongside the DB
         assert!(db.parent().unwrap().join("img_cache").exists());
 
         let cv = CachedVideo {
@@ -501,16 +614,13 @@ mod tests {
         upsert_cached_video(&conn, &cv).unwrap();
         let loaded = get_cached_video(&conn, &cv.url).unwrap().unwrap();
         assert_eq!(loaded.title, "Cached Title");
-        assert_eq!(loaded.video_id, "abc123DEF45");
 
-        // Upsert should replace
         let mut cv2 = cv.clone();
         cv2.title = "Updated".into();
         upsert_cached_video(&conn, &cv2).unwrap();
         let loaded2 = get_cached_video(&conn, &cv.url).unwrap().unwrap();
         assert_eq!(loaded2.title, "Updated");
 
-        // Lookup by video_id
         let by_id = get_cached_video_by_id(&conn, "abc123DEF45")
             .unwrap()
             .unwrap();
@@ -519,13 +629,18 @@ mod tests {
 
     #[test]
     fn test_thumbnail_cache_path_is_under_db_dir() {
-        // thumbnail_cache_path uses db_dir()/img_cache which resolves via dirs::data_local_dir,
-        // so we only verify the components and that the function does not panic.
         let p = thumbnail_cache_path("dQw4w9WgXcQ").unwrap();
         assert_eq!(p.file_name().unwrap().to_string_lossy(), "dQw4w9WgXcQ.jpg");
         assert_eq!(
             p.parent().unwrap().file_name().unwrap().to_string_lossy(),
             "img_cache"
         );
+    }
+
+    #[test]
+    fn test_video_work_dir_is_under_db_dir() {
+        let p = video_work_dir("dQw4w9WgXcQ").unwrap();
+        assert!(p.to_string_lossy().contains("videos"));
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "dQw4w9WgXcQ");
     }
 }

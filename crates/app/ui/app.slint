@@ -240,17 +240,17 @@ export component MainWindow inherits Window {
     in property <bool> show-model-drawer: false;
 
     in property <string> tr-navigate: "Navigate";
-    in property <string> tr-home: "Home";
-    in property <string> tr-new-project: "New Project";
+    in property <string> tr-home: "Inicio";
+    in property <string> tr-new-project: "Nuevo";
     in property <string> tr-export-standalone: "Export Standalone";
     in property <string> tr-settings: "Settings";
     in property <string> tr-keys: "AI / Keys";
     in property <string> tr-home-recent: "Recent projects";
     in property <string> tr-home-empty: "No projects yet. Create a new project to start.";
-    in property <string> tr-new-project-title: "New Project";
-    in property <string> tr-new-project-description: "Import a video, then let the analyzer find the strongest moments.";
-    in property <string> tr-source-step: "Source video";
-    in property <string> tr-analysis-step: "Analysis";
+    in property <string> tr-new-project-title: "Video";
+    in property <string> tr-new-project-description: "Pega una URL, verifica el video y lanza el analisis. El progreso se guarda por video y se verifica en cada etapa.";
+    in property <string> tr-source-step: "01  /  VIDEO";
+    in property <string> tr-analysis-step: "02  /  ANALISIS";
     in property <string> tr-analysis-settings: "Analysis settings are managed in Settings and AI / Keys.";
     in property <string> tr-url-label: "YouTube URL";
     in property <string> tr-fetch: "Fetch Info";
@@ -375,8 +375,7 @@ export component MainWindow inherits Window {
 
                 VerticalLayout {
                     spacing: 2px;
-                    NavItem { label: root.tr-home; active: route == "home"; clicked => { root.navigate("home"); } }
-                    NavItem { label: root.tr-new-project; active: route == "new-project"; clicked => { root.navigate("new-project"); } }
+                    NavItem { label: root.tr-home; active: route == "home" || route == "new-project"; clicked => { root.navigate("home"); } }
                     NavItem { label: root.tr-export-standalone; active: route == "export"; clicked => { root.navigate("export"); } }
                     NavItem { label: root.tr-settings; active: route == "settings"; clicked => { root.navigate("settings"); } }
                     NavItem { label: root.tr-keys; active: route == "keys"; clicked => { root.navigate("keys"); } }
@@ -397,48 +396,7 @@ export component MainWindow inherits Window {
                         spacing: 16px;
                         alignment: start;
 
-                        if route == "home": VerticalLayout {
-                        alignment: start;
-                        spacing: 10px;
-                        if !root.deps-ok: Rectangle {
-                            background: #2a1515;
-                            border-width: 1px;
-                            border-color: #7f1d1d;
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
-                                Text { text: root.tr-deps-missing; color: #fca5a5; font-size: 12px; font-weight: 700; }
-                                Text { text: root.tr-deps-installing; color: #fca5a5; font-size: 11px; wrap: word-wrap; }
-                            }
-                        }
-                        Text { text: root.tr-home-recent; color: #ffffff; font-size: 17px; font-weight: 700; }
-                        Rectangle { height: 1px; background: #27272a; }
-                        if root.home-recent-list == "": Rectangle {
-                            height: 120px;
-                            background: #1a1a1e;
-                            border-width: 1px;
-                            border-color: #27272a;
-                            VerticalLayout {
-                                padding: 16px;
-                                spacing: 10px;
-                                alignment: center;
-                                Text { text: root.tr-home-empty; color: #c3c6cc; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
-                                SquareButton { label: root.tr-new-project; primary: true; width: 126px; clicked => { root.navigate("new-project"); } }
-                            }
-                        }
-                        if root.home-recent-list != "": Rectangle {
-                            background: #1a1a1e;
-                            border-width: 1px;
-                            border-color: #27272a;
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 8px;
-                                Text { text: root.home-recent-list; color: #d4d4d8; font-size: 12px; wrap: word-wrap; }
-                            }
-                        }
-                    }
-
-                    if route == "new-project": VerticalLayout {
+                    if route == "home" || route == "new-project": VerticalLayout {
                         alignment: start;
                         spacing: 12px;
                         Text { text: root.tr-new-project-title; color: #ffffff; font-size: 17px; font-weight: 700; }

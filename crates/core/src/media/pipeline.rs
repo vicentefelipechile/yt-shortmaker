@@ -1,5 +1,5 @@
 // =================================================================================================
-// media::pipeline — Download → Split → Analyze → Persist
+// media::pipeline — Download → Split → Analyze → Persist (video-centric, resume via folder+DB)
 // =================================================================================================
 
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ pub enum PipelineEvent {
 pub struct PipelineCtx {
     pub url: String,
     pub config: Arc<AppConfig>,
-    /// Scratch directory for the downloaded video and chunks.
+    /// Persistent directory for this video (verified on resume via folder + DB).
     pub work_dir: PathBuf,
     /// Directory where final products land.
     pub output_dir: PathBuf,
@@ -69,7 +69,6 @@ impl Pipeline {
     where
         F: FnMut(PipelineEvent) + Send + 'static,
     {
-        // Fail fast if external tools are missing — avoids generic "yt-dlp failed" downstream.
         crate::setup::check_dependencies()?;
 
         let cfg = ctx.config.clone();
@@ -79,41 +78,136 @@ impl Pipeline {
 
         let video_id = ytdlp::extract_video_id(&ctx.url)
             .unwrap_or_else(|| format!("video_{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
+        tracing::info!(
+            "pipeline start video_id={} url={} work_dir={}",
+            video_id,
+            ctx.url,
+            ctx.work_dir.display()
+        );
+        tracing::debug!(
+            "config chunk_size={} max_last={} delay={} retry={}",
+            processing.chunk_size_secs,
+            processing.max_last_chunk_secs,
+            processing.chunk_delay_secs,
+            processing.retry_attempts
+        );
+        // Work dir is per-video persistent (session::video_work_dir). Verify folder exists.
+        std::fs::create_dir_all(&ctx.work_dir).context("creating work_dir")?;
+        tracing::debug!("work_dir verified {}", ctx.work_dir.display());
         let video_path = ctx.work_dir.join(format!("{video_id}.mp4"));
 
-        // 1. Download (0.00 - 0.25) — streams yt-dlp output line-by-line as Log events
+        // Ensure job row exists (for folder+DB verification)
+        let title_hint = video_id.clone();
+        let db_path = session::db_path()?;
+        let conn = session::init_db(&db_path)?;
+        let existing_job = session::get_video_job(&conn, &video_id).ok().flatten();
+        if existing_job.is_none() {
+            // Create placeholder job; title/duration will be updated after download
+            let job = session::VideoJob {
+                video_id: video_id.clone(),
+                url: ctx.url.clone(),
+                title: title_hint.clone(),
+                duration: 0.0,
+                work_dir: ctx.work_dir.to_string_lossy().to_string(),
+                download_path: Some(video_path.to_string_lossy().to_string()),
+                download_verified: false,
+                split_verified: false,
+                total_chunks: 0,
+                analyzed_chunks: 0,
+                status: "pending".into(),
+            };
+            let _ = session::upsert_video_job(&conn, &job);
+        }
+        drop(conn);
+
+        // 1. Download — verify folder+file+DB before deciding
         check_cancelled(&ctx.cancellation)?;
         on_event(PipelineEvent::StageChanged(Stage::Downloading));
-        on_event(PipelineEvent::Progress(
-            0.05,
-            "Downloading (low res for analysis)".into(),
-        ));
-        on_event(PipelineEvent::Log(format!(
-            "yt-dlp: {} -o {} -f worst[ext=mp4]/worst {}",
-            ctx.url,
+        let download_ok = is_download_verified(&video_id, &video_path);
+        tracing::info!(
+            "download check video_id={} path={} verified={}",
+            video_id,
             video_path.display(),
-            if cookies.use_cookies { "(cookies)" } else { "" }
-        )));
-        download_with_logs(
-            &ctx.url,
-            &video_path,
-            cookies.use_cookies,
-            (!cookies.path.is_empty()).then_some(cookies.path.as_str()),
-            true,
-            processing.retry_attempts,
-            &ctx.cancellation,
-            &mut on_event,
-        )
-        .await?;
-        on_event(PipelineEvent::Progress(0.25, "Download complete".into()));
+            download_ok
+        );
+        if download_ok {
+            tracing::info!("download skip yt-dlp verified {}", video_path.display());
+            on_event(PipelineEvent::Log(format!(
+                "download verified on disk+DB, skipping yt-dlp for {video_id}"
+            )));
+            on_event(PipelineEvent::Progress(1.0, "Download verified".into()));
+            update_job_status(&video_id, "splitting", false)?;
+        } else {
+            tracing::info!("download start {} -> {}", ctx.url, video_path.display());
+            if cookies.use_cookies {
+                tracing::debug!("using cookies {}", cookies.path);
+            }
+            // Invalidate downstream if download missing
+            update_job_download(&video_id, &video_path, false, 0.0)?;
+            on_event(PipelineEvent::Progress(
+                0.0,
+                "Downloading (low res for analysis)".into(),
+            ));
+            on_event(PipelineEvent::Log(format!(
+                "yt-dlp: {} -o {} -f worst[ext=mp4]/worst {}",
+                ctx.url,
+                video_path.display(),
+                if cookies.use_cookies { "(cookies)" } else { "" }
+            )));
+            if let Err(e) = download_with_logs(
+                &ctx.url,
+                &video_path,
+                cookies.use_cookies,
+                (!cookies.path.is_empty()).then_some(cookies.path.as_str()),
+                true,
+                processing.retry_attempts,
+                &ctx.cancellation,
+                &mut on_event,
+            )
+            .await
+            {
+                tracing::error!("download failed video_id={} err={:#}", video_id, e);
+                return Err(e);
+            }
+            // Verify downloaded file
+            let dur = ffmpeg::get_duration(&video_path).unwrap_or(0.0);
+            tracing::info!(
+                "download complete {} duration={:.1}s size={} bytes",
+                video_path.display(),
+                dur,
+                std::fs::metadata(&video_path).map(|m| m.len()).unwrap_or(0)
+            );
+            if dur <= 0.1 {
+                tracing::error!(
+                    "downloaded duration invalid {} dur={}",
+                    video_path.display(),
+                    dur
+                );
+                anyhow::bail!("downloaded video duration invalid; file likely corrupt");
+            }
+            update_job_download(&video_id, &video_path, true, dur)?;
+            on_event(PipelineEvent::Progress(1.0, "Download complete".into()));
+        }
 
-        // 2. Split (0.25 - 0.40)
+        // 2. Split — verify folder+chunks+DB
         check_cancelled(&ctx.cancellation)?;
         on_event(PipelineEvent::StageChanged(Stage::Splitting));
+        on_event(PipelineEvent::Progress(0.0, "Splitting".into()));
+        tracing::info!("split start source={}", video_path.display());
         if let Ok((w, h)) = ffmpeg::get_resolution(&video_path) {
+            tracing::info!(
+                "source resolution {}x{} file={}",
+                w,
+                h,
+                video_path.display()
+            );
             on_event(PipelineEvent::Log(format!("Source resolution: {w}x{h}")));
+        } else {
+            tracing::warn!("could not get resolution for {}", video_path.display());
         }
-        let duration = ffmpeg::get_duration(&video_path)?;
+        let duration = ffmpeg::get_duration(&video_path).inspect_err(|e| {
+            tracing::error!("get_duration failed {} err={:#}", video_path.display(), e)
+        })?;
         let ranges = chunk::calculate_chunks(
             duration.max(0.0) as u64,
             processing.chunk_size_secs,
@@ -122,42 +216,149 @@ impl Pipeline {
         if ranges.is_empty() {
             anyhow::bail!("video duration is 0; cannot split");
         }
-        on_event(PipelineEvent::Log(format!(
-            "Splitting {}s into {} chunks ({}s each)",
-            duration as u64,
-            ranges.len(),
-            processing.chunk_size_secs
-        )));
-        // Emit per-chunk ffmpeg commands as logs before running
-        for (i, (start, dur)) in ranges.iter().enumerate() {
+        // Folder+DB verification for split
+        let split_ok = is_split_verified(&video_id, &ctx.work_dir, &ranges);
+        tracing::info!(
+            "split check video_id={} verified={} expected_chunks={}",
+            video_id,
+            split_ok,
+            ranges.len()
+        );
+        let chunks: Vec<crate::types::VideoChunk> = if split_ok {
+            tracing::info!("split skip ffmpeg verified chunks={}", ranges.len());
             on_event(PipelineEvent::Log(format!(
-                "ffmpeg: -ss {start} -i {} -t {dur} -c copy {}",
-                video_path.display(),
-                ctx.work_dir.join(format!("chunk_{i}.mp4")).display()
+                "split verified on disk+DB: {} chunks, skipping ffmpeg",
+                ranges.len()
             )));
-        }
-        let chunks = split_with_logs(
-            &video_path,
-            &ranges,
-            &ctx.work_dir,
-            &ctx.cancellation,
-            &mut on_event,
-        )
-        .await?;
-        on_event(PipelineEvent::Progress(0.40, "Split complete".into()));
+            // Load chunks from DB
+            let conn = session::init_db(&session::db_path()?)?;
+            let stored = session::get_job_chunks(&conn, &video_id)?;
+            tracing::debug!("loaded {} chunks from DB for {}", stored.len(), video_id);
+            if stored.len() == ranges.len() {
+                stored
+            } else {
+                tracing::warn!(
+                    "split verified but DB len {} != expected {} — re-splitting",
+                    stored.len(),
+                    ranges.len()
+                );
+                // Mismatch despite verified flag — re-split
+                split_and_persist(
+                    &video_id,
+                    &video_path,
+                    &ranges,
+                    &ctx.work_dir,
+                    &ctx.cancellation,
+                    &mut on_event,
+                )
+                .await?
+            }
+        } else {
+            tracing::info!(
+                "splitting {}s into {} chunks",
+                duration as u64,
+                ranges.len()
+            );
+            on_event(PipelineEvent::Log(format!(
+                "Splitting {}s into {} chunks ({}s each)",
+                duration as u64,
+                ranges.len(),
+                processing.chunk_size_secs
+            )));
+            for (i, (start, dur)) in ranges.iter().enumerate() {
+                let msg = format!(
+                    "ffmpeg: -ss {start} -i {} -t {dur} -c copy {}",
+                    video_path.display(),
+                    ctx.work_dir.join(format!("chunk_{i}.mp4")).display()
+                );
+                tracing::debug!("{}", msg);
+                on_event(PipelineEvent::Log(msg));
+            }
+            split_and_persist(
+                &video_id,
+                &video_path,
+                &ranges,
+                &ctx.work_dir,
+                &ctx.cancellation,
+                &mut on_event,
+            )
+            .await
+            .inspect_err(|e| tracing::error!("split failed video_id={} err={:#}", video_id, e))?
+        };
+        on_event(PipelineEvent::Progress(1.0, "Split complete".into()));
 
-        // 3. Analyze per chunk (0.40 - 0.90)
+        // 3. Analyze per chunk — resume by verifying each chunk's status sequentially
         let provider = provider_registry
             .active()
             .ok_or_else(|| anyhow::anyhow!("no active AI provider"))?;
-        let mut moments: Vec<VideoMoment> = Vec::new();
         let total = chunks.len();
+        tracing::info!(
+            "analyze start total_chunks={} analyzed_cached={}",
+            total,
+            session::init_db(&session::db_path()?)
+                .ok()
+                .and_then(|c| session::get_job_chunk_status(&c, &video_id).ok())
+                .map(|v| v.iter().filter(|(_, s)| s == "analyzed").count())
+                .unwrap_or(0)
+        );
+        // Load existing moments for resume (already appended per chunk)
+        let conn = session::init_db(&session::db_path()?)?;
+        let mut moments: Vec<VideoMoment> =
+            session::get_job_moments(&conn, &video_id).unwrap_or_default();
+        tracing::debug!("loaded {} existing moments for {}", moments.len(), video_id);
+        // Ensure we don't have more moments than expected due to prior partial run — keep as is
+        drop(conn);
+        // Build set of already analyzed chunk indices
+        let analyzed_set = get_analyzed_indices(&video_id);
+        tracing::debug!("analyzed_set={:?} for {}", analyzed_set, video_id);
         for (i, vc) in chunks.iter().enumerate() {
             check_cancelled(&ctx.cancellation)?;
+            tracing::info!(
+                "chunk {}/{} path={} start={}s analyzed={}",
+                i + 1,
+                total,
+                vc.file_path,
+                vc.start_seconds,
+                analyzed_set.contains(&(i as i64))
+            );
+            if analyzed_set.contains(&(i as i64)) {
+                // Strictly verify file still exists before skipping
+                if !Path::new(&vc.file_path).exists() {
+                    tracing::error!("chunk {} marked analyzed but missing {}", i, vc.file_path);
+                    anyhow::bail!("chunk {} marked analyzed but file missing at {} — abort resume to avoid skipping", i, vc.file_path);
+                }
+                tracing::info!("chunk {}/{} skip cached", i + 1, total);
+                on_event(PipelineEvent::Log(format!(
+                    "Chunk {}/{} already analyzed, skipping (verified on disk+DB)",
+                    i + 1,
+                    total
+                )));
+                on_event(PipelineEvent::Progress(
+                    (i + 1) as f32 / total as f32,
+                    format!("Analyzing {}/{} (cached)", i + 1, total),
+                ));
+                continue;
+            }
+            // Must not skip ahead: ensure all prior chunks were analyzed
+            for prev in 0..i {
+                if !analyzed_set.contains(&(prev as i64)) {
+                    tracing::error!(
+                        "strict order violated cannot analyze {} before {} analyzed",
+                        i,
+                        prev
+                    );
+                    anyhow::bail!("cannot analyze chunk {} before chunk {} is analyzed — strict order violated", i, prev);
+                }
+            }
             on_event(PipelineEvent::StageChanged(Stage::Analyzing {
                 current: i + 1,
                 total,
             }));
+            let step_frac_start = i as f32 / total as f32;
+            on_event(PipelineEvent::Progress(
+                step_frac_start,
+                format!("Analyzing {}/{}", i + 1, total),
+            ));
             on_event(PipelineEvent::Log(format!(
                 "Analyzing chunk {}/{} (start {}s)",
                 i + 1,
@@ -165,36 +366,92 @@ impl Pipeline {
                 vc.start_seconds
             )));
 
+            // Verify chunk file exists before analyzing
+            if !Path::new(&vc.file_path).exists() {
+                tracing::error!("chunk file missing {}", vc.file_path);
+                anyhow::bail!("chunk file missing for analysis: {}", vc.file_path);
+            }
+            tracing::info!(
+                "analyze_chunk start idx={} file={} model={}",
+                i,
+                vc.file_path,
+                cfg.ai.resolved_model()
+            );
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ai::ProviderEvent>();
-            let chunk_moments = provider
+            let chunk_start = std::time::Instant::now();
+            let chunk_res = provider
                 .analyze_chunk(crate::ai::AnalyzeCtx {
                     chunk_path: PathBuf::from(&vc.file_path),
                     chunk_start_offset: std::time::Duration::from_secs(vc.start_seconds),
                     cancellation: ctx.cancellation.clone(),
                     progress_tx: Some(tx),
                 })
-                .await?;
-            // Drain any provider events queued during analyze
+                .await;
+            let chunk_moments = match chunk_res {
+                Ok(m) => {
+                    tracing::info!(
+                        "chunk {} success {} moments in {:?}",
+                        i,
+                        m.len(),
+                        chunk_start.elapsed()
+                    );
+                    m
+                }
+                Err(e) => {
+                    tracing::error!("chunk {} failed file={} err={:#}", i, vc.file_path, e);
+                    return Err(e.context(format!("chunk {} analyze failed", i)));
+                }
+            };
             while let Ok(ev) = rx.try_recv() {
                 match ev {
                     crate::ai::ProviderEvent::Log(msg) => on_event(PipelineEvent::Log(msg)),
-                    crate::ai::ProviderEvent::Progress(p) => on_event(PipelineEvent::Progress(
-                        0.40 + 0.50 * p,
-                        format!("AI {:.0}%", p * 100.0),
-                    )),
+                    crate::ai::ProviderEvent::Progress(p) => {
+                        let blended = (i as f32 + p.clamp(0.0, 1.0)) / total as f32;
+                        on_event(PipelineEvent::Progress(
+                            blended,
+                            format!("AI {:.0}%", p * 100.0),
+                        ));
+                    }
                 }
             }
 
+            tracing::info!(
+                "chunk {} found {} moments, persisting",
+                i + 1,
+                chunk_moments.len()
+            );
             on_event(PipelineEvent::Log(format!(
                 "Chunk {}: found {} moments",
                 i + 1,
                 chunk_moments.len()
             )));
+            // Persist incrementally per chunk
+            let conn = session::init_db(&session::db_path()?)?;
+            session::append_job_moments(&conn, &video_id, &chunk_moments)
+                .inspect_err(|e| tracing::error!("append moments failed {e:#}"))?;
+            session::update_job_chunk_status(&conn, &video_id, i as i64, "analyzed")
+                .inspect_err(|e| tracing::error!("update chunk status failed {e:#}"))?;
+            // Update job progress
+            let analyzed_now = session::get_job_chunk_status(&conn, &video_id)?
+                .iter()
+                .filter(|(_, s)| s == "analyzed")
+                .count() as i64;
+            if let Some(mut job) = session::get_video_job(&conn, &video_id)? {
+                job.analyzed_chunks = analyzed_now;
+                job.status = if analyzed_now as usize == total {
+                    "analyzed".into()
+                } else {
+                    "analyzing".into()
+                };
+                job.work_dir = ctx.work_dir.to_string_lossy().to_string();
+                session::upsert_video_job(&conn, &job)?;
+            }
+            drop(conn);
             moments.extend(chunk_moments);
 
             let frac = (i + 1) as f32 / total as f32;
             on_event(PipelineEvent::Progress(
-                0.40 + 0.50 * frac,
+                frac,
                 format!("Analyzing {}/{}", i + 1, total),
             ));
 
@@ -204,11 +461,30 @@ impl Pipeline {
             }
         }
 
-        // 4. Persist to DB
-        persist(&ctx, &video_id, &video_path, &chunks, &moments)?;
-        on_event(PipelineEvent::Progress(0.95, "Saved to database".into()));
+        on_event(PipelineEvent::Progress(1.0, "Saving".into()));
+        tracing::info!(
+            "pipeline saving video_id={} total_moments={} total_chunks={}",
+            video_id,
+            moments.len(),
+            chunks.len()
+        );
+        // Final job status update
+        let conn = session::init_db(&session::db_path()?)?;
+        if let Some(mut job) = session::get_video_job(&conn, &video_id)? {
+            job.status = "done".into();
+            job.duration = ffmpeg::get_duration(&video_path).unwrap_or(job.duration);
+            session::upsert_video_job(&conn, &job)?;
+            tracing::info!(
+                "job done {} status={} duration={:.1}s work_dir={}",
+                job.video_id,
+                job.status,
+                job.duration,
+                job.work_dir
+            );
+        }
+        drop(conn);
+        on_event(PipelineEvent::Progress(1.0, "Saved to database".into()));
 
-        // 5. Optional auto-extract (0.95 - 1.00)
         if processing.auto_extract {
             on_event(PipelineEvent::StageChanged(Stage::Extracting));
             let plano = crate::plano::schema::create_default_plano();
@@ -216,11 +492,16 @@ impl Pipeline {
             on_event(PipelineEvent::Log(format!(
                 "auto_extract: {info} - extraction ships with export milestone (M5)"
             )));
-            // Demonstrate save_plano wiring (writes plano.json to work_dir for inspection)
             let tmp_plano = ctx.work_dir.join("plano.json");
             let _ = crate::plano::schema::save_plano(&tmp_plano.to_string_lossy(), &plano);
         }
 
+        tracing::info!(
+            "pipeline done video_id={} chunks={} moments={}",
+            video_id,
+            chunks.len(),
+            moments.len()
+        );
         on_event(PipelineEvent::Progress(1.0, "Done".into()));
         Ok(RunOutput {
             video_id,
@@ -238,7 +519,190 @@ impl Default for Pipeline {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Helpers
+// Helpers — verification (folder + DB)
+// -------------------------------------------------------------------------------------------------
+
+fn is_download_verified(video_id: &str, path: &Path) -> bool {
+    if !path.exists() {
+        tracing::debug!("download verify miss: file not exists {}", path.display());
+        return false;
+    }
+    if path.metadata().map(|m| m.len() < 1024).unwrap_or(true) {
+        tracing::debug!("download verify miss: file too small {}", path.display());
+        return false;
+    }
+    let dur = ffmpeg::get_duration(path).unwrap_or(0.0);
+    if dur <= 0.1 {
+        tracing::debug!(
+            "download verify miss: bad duration {} dur={}",
+            path.display(),
+            dur
+        );
+        return false;
+    }
+    // Check DB flag
+    match session::db_path()
+        .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e.to_string())))
+    {
+        Ok(db) => match session::get_video_job(&db, video_id) {
+            Ok(Some(job)) => {
+                if job.download_verified
+                    && job.download_path.as_deref() == Some(path.to_string_lossy().as_ref())
+                {
+                    tracing::debug!("download verify hit db {}", video_id);
+                    return true;
+                }
+                tracing::debug!(
+                    "download verify miss db flag verified={} path={:?}",
+                    job.download_verified,
+                    job.download_path
+                );
+                false
+            }
+            Ok(None) => {
+                tracing::debug!("download verify miss: no job for {}", video_id);
+                false
+            }
+            Err(e) => {
+                tracing::debug!("download verify miss db err {e:#}");
+                false
+            }
+        },
+        Err(e) => {
+            tracing::debug!("download verify miss db_path err {e:#}");
+            false
+        }
+    }
+}
+
+fn update_job_download(
+    video_id: &str,
+    path: &Path,
+    verified: bool,
+    duration: f64,
+) -> anyhow::Result<()> {
+    let conn = session::init_db(&session::db_path()?)?;
+    if let Some(mut job) = session::get_video_job(&conn, video_id)? {
+        job.download_path = Some(path.to_string_lossy().to_string());
+        job.download_verified = verified;
+        if duration > 0.0 {
+            job.duration = duration;
+        }
+        job.status = if verified {
+            "downloaded".into()
+        } else {
+            "downloading".into()
+        };
+        session::upsert_video_job(&conn, &job)?;
+    }
+    Ok(())
+}
+
+fn update_job_status(video_id: &str, status: &str, split_verified: bool) -> anyhow::Result<()> {
+    let conn = session::init_db(&session::db_path()?)?;
+    if let Some(mut job) = session::get_video_job(&conn, video_id)? {
+        job.status = status.to_owned();
+        if split_verified {
+            job.split_verified = true;
+        }
+        session::upsert_video_job(&conn, &job)?;
+    }
+    Ok(())
+}
+
+fn is_split_verified(video_id: &str, work_dir: &Path, expected: &[(u64, u64)]) -> bool {
+    if !work_dir.exists() {
+        tracing::debug!(
+            "split verify miss: work_dir not exists {}",
+            work_dir.display()
+        );
+        return false;
+    }
+    let conn = match session::db_path()
+        .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e.to_string())))
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let job = match session::get_video_job(&conn, video_id).ok().flatten() {
+        Some(j) => j,
+        None => return false,
+    };
+    if !job.split_verified || job.total_chunks as usize != expected.len() {
+        return false;
+    }
+    let stored = match session::get_job_chunks(&conn, video_id) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if stored.len() != expected.len() {
+        return false;
+    }
+    for (i, (exp_start, exp_dur)) in expected.iter().enumerate() {
+        if i >= stored.len() {
+            return false;
+        }
+        let c = &stored[i];
+        if c.start_seconds != *exp_start {
+            return false;
+        }
+        let path = Path::new(&c.file_path);
+        if !path.exists() {
+            return false;
+        }
+        // Verify chunk file has plausible duration
+        if let Ok(d) = ffmpeg::get_duration(path) {
+            if (d - *exp_dur as f64).abs() > 1.0 && d < 0.5 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+async fn split_and_persist<F>(
+    video_id: &str,
+    video_path: &Path,
+    ranges: &[(u64, u64)],
+    work_dir: &Path,
+    cancellation: &CancellationToken,
+    on_event: &mut F,
+) -> anyhow::Result<Vec<crate::types::VideoChunk>>
+where
+    F: FnMut(PipelineEvent) + Send + 'static,
+{
+    let chunks = split_with_logs(video_path, ranges, work_dir, cancellation, on_event).await?;
+    let conn = session::init_db(&session::db_path()?)?;
+    session::insert_job_chunks(&conn, video_id, &chunks)?;
+    if let Some(mut job) = session::get_video_job(&conn, video_id)? {
+        job.total_chunks = chunks.len() as i64;
+        job.split_verified = true;
+        job.status = "splitting".into();
+        job.work_dir = work_dir.to_string_lossy().to_string();
+        session::upsert_video_job(&conn, &job)?;
+    }
+    Ok(chunks)
+}
+
+fn get_analyzed_indices(video_id: &str) -> std::collections::HashSet<i64> {
+    if let Ok(conn) = session::db_path()
+        .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e.to_string())))
+    {
+        if let Ok(status) = session::get_job_chunk_status(&conn, video_id) {
+            return status
+                .into_iter()
+                .filter(|(_, s)| s == "analyzed")
+                .map(|(idx, _)| idx)
+                .collect();
+        }
+    }
+    std::collections::HashSet::new()
+}
+
+// -------------------------------------------------------------------------------------------------
+// Helpers — download / split
 // -------------------------------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +768,8 @@ where
 {
     let mut cmd = Command::new(crate::setup::yt_dlp_bin());
     cmd.arg("--no-playlist")
+        .arg("--newline")
+        .arg("--progress")
         .arg("-o")
         .arg(output.to_string_lossy().into_owned());
     if low_res {
@@ -328,49 +794,41 @@ where
             anyhow::Error::from(e).context("failed to run yt-dlp")
         }
     })?;
-    let stderr = child.stderr.take();
-    if let Some(stderr) = stderr {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            if cancellation.is_cancelled() {
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stream| BufReader::new(stream).lines());
+    let stdout = child
+        .stdout
+        .take()
+        .map(|stream| BufReader::new(stream).lines());
+    let mut stderr_lines = stderr;
+    let mut stdout_lines = stdout;
+    let mut stderr_done = stderr_lines.is_none();
+    let mut stdout_done = stdout_lines.is_none();
+    let mut last_pct: Option<f32> = None;
+
+    while !stderr_done || !stdout_done {
+        tokio::select! {
+            result = async {
+                stderr_lines.as_mut().expect("stderr stream exists").next_line().await
+            }, if !stderr_done => {
+                match result.context("reading yt-dlp stderr")? {
+                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, on_event),
+                    None => stderr_done = true,
+                }
+            }
+            result = async {
+                stdout_lines.as_mut().expect("stdout stream exists").next_line().await
+            }, if !stdout_done => {
+                match result.context("reading yt-dlp stdout")? {
+                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, on_event),
+                    None => stdout_done = true,
+                }
+            }
+            _ = cancellation.cancelled() => {
                 let _ = child.kill().await;
                 anyhow::bail!("cancelled");
-            }
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .context("reading yt-dlp stderr")?;
-            if n == 0 {
-                break;
-            }
-            let trimmed = line.trim().to_string();
-            if !trimmed.is_empty() {
-                on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
-            }
-            // Small cooperative yield to allow cancellation
-            if line.len() > 4096 {
-                line.clear();
-            }
-        }
-    }
-    // Also drain stdout if any
-    if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .context("reading yt-dlp stdout")?;
-            if n == 0 {
-                break;
-            }
-            let trimmed = line.trim().to_string();
-            if !trimmed.is_empty() {
-                on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
             }
         }
     }
@@ -379,6 +837,53 @@ where
         anyhow::bail!("yt-dlp download failed (exit {status})");
     }
     Ok(())
+}
+
+fn emit_ytdlp_line<F>(line: &str, last_pct: &mut Option<f32>, on_event: &mut F)
+where
+    F: FnMut(PipelineEvent),
+{
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
+    if let Some(p) = parse_ytdlp_progress(trimmed) {
+        let emit = last_pct.is_none_or(|prev| (p - prev).abs() >= 0.005 || p >= 1.0);
+        if emit {
+            *last_pct = Some(p);
+            on_event(PipelineEvent::Progress(
+                p.clamp(0.0, 1.0),
+                format!("Downloading {:.0}%", p * 100.0),
+            ));
+        }
+    }
+}
+
+fn parse_ytdlp_progress(line: &str) -> Option<f32> {
+    if !line.contains("[download]") {
+        return None;
+    }
+    let pct_idx = line.find('%')?;
+    let bytes = line.as_bytes();
+    let mut start = pct_idx;
+    while start > 0 {
+        let c = bytes[start - 1] as char;
+        if c.is_ascii_digit() || c == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start >= pct_idx {
+        return None;
+    }
+    let num_str = &line[start..pct_idx];
+    let v: f32 = num_str.trim().parse().ok()?;
+    if !(0.0..=100.0).contains(&v) {
+        return None;
+    }
+    Some(v / 100.0)
 }
 
 async fn split_with_logs<F>(
@@ -424,7 +929,6 @@ where
                 anyhow::Error::from(e).context("failed to run ffmpeg")
             }
         })?;
-        // Stream stderr
         if let Some(stderr) = child.stderr.take() {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
@@ -451,10 +955,26 @@ where
         if !status.success() {
             anyhow::bail!("ffmpeg split failed for chunk {i} (exit {status})");
         }
+        let size = std::fs::metadata(&chunk_path).map(|m| m.len()).unwrap_or(0);
+        let dur_actual = ffmpeg::get_duration(&chunk_path).unwrap_or(0.0);
+        tracing::info!(
+            "chunk split ok {}/{} file={} dur={:.1}s size={}",
+            i + 1,
+            chunks.len(),
+            chunk_path.display(),
+            dur_actual,
+            size
+        );
         video_chunks.push(crate::types::VideoChunk {
             start_seconds: *start,
             file_path: chunk_path.to_string_lossy().to_string(),
         });
+        let total = chunks.len() as f32;
+        let done = (i + 1) as f32 / total;
+        on_event(PipelineEvent::Progress(
+            done,
+            format!("Splitting {}/{}", i + 1, chunks.len()),
+        ));
     }
     Ok(video_chunks)
 }
@@ -466,31 +986,36 @@ fn check_cancelled(token: &CancellationToken) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn persist(
-    ctx: &PipelineCtx,
-    video_id: &str,
-    video_path: &Path,
-    chunks: &[crate::types::VideoChunk],
-    moments: &[VideoMoment],
-) -> anyhow::Result<()> {
-    let conn = session::init_db(&session::db_path()?)?;
-    let project_id = format!("{video_id}-{}", chrono::Local::now().format("%Y%m%d%H%M%S"));
-    let title = video_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| video_id.to_owned());
-    session::insert_project(
-        &conn,
-        &session::Project {
-            id: project_id.clone(),
-            url: ctx.url.clone(),
-            video_id: video_id.to_owned(),
-            title,
-            duration: ffmpeg::get_duration(video_path).unwrap_or(0.0),
-            status: "analyzed".to_owned(),
-        },
-    )?;
-    session::insert_chunks(&conn, &project_id, chunks)?;
-    session::insert_moments(&conn, &project_id, moments)?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx_eq(a: Option<f32>, b: Option<f32>) -> bool {
+        match (a, b) {
+            (Some(x), Some(y)) => (x - y).abs() < 1e-6,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_parse_ytdlp_progress() {
+        assert!(approx_eq(
+            parse_ytdlp_progress("[download]  45.2% of 10.00MiB at 1.00MiB/s ETA 00:10"),
+            Some(0.452)
+        ));
+        assert!(approx_eq(
+            parse_ytdlp_progress("[download] 100% of 5.12MiB in 00:02"),
+            Some(1.0)
+        ));
+        assert_eq!(
+            parse_ytdlp_progress("[download] Destination: video.mp4"),
+            None
+        );
+        assert_eq!(parse_ytdlp_progress("some other line 50%"), None);
+        assert!(approx_eq(
+            parse_ytdlp_progress("[download]   0.0%"),
+            Some(0.0)
+        ));
+    }
 }

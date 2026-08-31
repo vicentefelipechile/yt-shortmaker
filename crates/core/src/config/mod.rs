@@ -370,9 +370,9 @@ impl AppConfig {
             self.processing.chunk_size_secs = DEFAULT_CHUNK_SIZE_SECS;
             issues.push("chunk_size out of range (1-120 min), reset to 10 min".to_owned());
         }
-        if self.processing.max_last_chunk_secs > self.processing.chunk_size_secs {
+        if !(60..=3600).contains(&self.processing.max_last_chunk_secs) {
             self.processing.max_last_chunk_secs = DEFAULT_MAX_LAST_CHUNK_SECS;
-            issues.push("max_last_chunk > chunk_size, reset".to_owned());
+            issues.push("max_last_chunk out of range (60-3600s), reset".to_owned());
         }
         if self.processing.retry_attempts == 0 {
             self.processing.retry_attempts = DEFAULT_RETRY_ATTEMPTS;

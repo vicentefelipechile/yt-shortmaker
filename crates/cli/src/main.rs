@@ -74,7 +74,7 @@ fn resolve_plano(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_ansi(false).init();
     let cli = Cli::parse();
 
     match cli.command {
@@ -137,12 +137,10 @@ async fn main() -> anyhow::Result<()> {
             if provider != "gemini" {
                 cfg.ai.active_provider = provider.clone();
             }
-            let work_dir = std::env::temp_dir().join("yt-shortmaker-v2").join(format!(
-                "cli-{}-{}",
-                yt_shortmaker_core::media::ytdlp::extract_video_id(&url)
-                    .unwrap_or_else(|| "video".into()),
-                chrono::Local::now().format("%Y%m%d%H%M%S")
-            ));
+            let vid = yt_shortmaker_core::media::ytdlp::extract_video_id(&url)
+                .unwrap_or_else(|| "video".into());
+            let work_dir = yt_shortmaker_core::session::video_work_dir(&vid)
+                .unwrap_or_else(|_| std::env::temp_dir().join("yt-shortmaker-v2").join(&vid));
             let output_dir = cfg
                 .output_dir
                 .clone()

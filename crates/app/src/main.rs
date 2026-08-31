@@ -305,46 +305,49 @@ fn refresh_models_list(app: &MainWindow, config: &yt_shortmaker_core::config::Ap
     }
 }
 
-fn refresh_home(app: &MainWindow) {
-    let text = match session::db_path()
-        .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e)))
-    {
-        Ok(conn) => match session::list_projects(&conn) {
-            Ok(projects) if !projects.is_empty() => {
-                // Wire get_project / get_moments / delete_project (M4 Review) — verify first project loads
-                if let Some(first) = projects.first() {
-                    if let Ok(Some(_proj)) = session::get_project(&conn, &first.id) {
-                        let _ = session::get_moments(&conn, &first.id);
-                        // keep delete_project compiled and linked for M4 Review (no-op reference)
-                        let _ = session::delete_project as fn(&_, &str) -> anyhow::Result<()>;
-                    }
-                }
-                projects
-                    .iter()
-                    .take(10)
-                    .map(|pr| format!("{} - {} [{}] {}", pr.title, pr.video_id, pr.status, pr.id))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            Ok(_) => String::new(),
-            Err(e) => {
-                tracing::warn!("list_projects failed: {e}");
-                String::new()
-            }
-        },
-        Err(e) => {
-            tracing::debug!("session db not ready: {e}");
-            String::new()
-        }
-    };
-    app.set_home_recent_list(text.into());
+fn work_dir_for(video_id: &str) -> std::path::PathBuf {
+    // Persistent per-video work dir (verified on resume via folder + DB)
+    session::video_work_dir(video_id)
+        .unwrap_or_else(|_| std::env::temp_dir().join("yt-shortmaker-v2").join(video_id))
 }
 
-fn work_dir_for(video_id: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join("yt-shortmaker-v2").join(format!(
-        "{video_id}-{}",
-        chrono::Local::now().format("%Y%m%d%H%M%S")
-    ))
+fn ensure_video_job(video_id: &str, url: &str, title: &str, duration: f64) {
+    let work_dir = work_dir_for(video_id);
+    let _ = std::fs::create_dir_all(&work_dir);
+    if let Ok(db_path) = session::db_path() {
+        if let Ok(conn) = session::init_db(&db_path) {
+            let existing = session::get_video_job(&conn, video_id).ok().flatten();
+            let job = session::VideoJob {
+                video_id: video_id.to_owned(),
+                url: url.to_owned(),
+                title: title.to_owned(),
+                duration,
+                work_dir: work_dir.to_string_lossy().to_string(),
+                download_path: existing
+                    .as_ref()
+                    .and_then(|j| j.download_path.clone())
+                    .or_else(|| {
+                        Some(
+                            work_dir
+                                .join(format!("{video_id}.mp4"))
+                                .to_string_lossy()
+                                .to_string(),
+                        )
+                    }),
+                download_verified: existing
+                    .as_ref()
+                    .map(|j| j.download_verified)
+                    .unwrap_or(false),
+                split_verified: existing.as_ref().map(|j| j.split_verified).unwrap_or(false),
+                total_chunks: existing.as_ref().map(|j| j.total_chunks).unwrap_or(0),
+                analyzed_chunks: existing.as_ref().map(|j| j.analyzed_chunks).unwrap_or(0),
+                status: existing
+                    .map(|j| j.status)
+                    .unwrap_or_else(|| "pending".to_string()),
+            };
+            let _ = session::upsert_video_job(&conn, &job);
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -356,6 +359,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_ansi(false)
         .init();
 
     let config = config_store::load().unwrap_or_default();
@@ -371,7 +375,7 @@ fn main() -> anyhow::Result<()> {
         let mut cfg = config_rc.borrow_mut();
         let issues = cfg.normalize();
         if !issues.is_empty() {
-            tracing::info!("config normalized: {:?}", issues);
+            tracing::debug!("config normalized: {:?}", issues);
             let to_save = cfg.clone();
             drop(cfg);
             let _ = config_store::save(&to_save);
@@ -381,11 +385,12 @@ fn main() -> anyhow::Result<()> {
     }
     refresh_models_list(&app, &config_rc.borrow());
     let had_deps = update_deps_ui(&app);
-    refresh_home(&app);
     if !had_deps {
         // The app installs its own dependencies — no user manual step
         spawn_ensure_tools(app.as_weak());
     }
+    // Ensure home-recent property exists but not used (no projects list)
+    app.set_home_recent_list("".into());
 
     let app_weak = app.as_weak();
 
@@ -393,10 +398,13 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app_weak.clone();
         move |route| {
             if let Some(app) = app_weak.upgrade() {
-                app.set_route(route.clone());
-                if route == "home" {
-                    refresh_home(&app);
-                }
+                // Normalize legacy new-project route to home (single video flow)
+                let route = if route == "new-project" {
+                    "home".into()
+                } else {
+                    route
+                };
+                app.set_route(route);
             }
         }
     });
@@ -416,16 +424,37 @@ fn main() -> anyhow::Result<()> {
                         return;
                     }
                 }
-                let url: String = app.get_url_input().into();
+                let raw_url: String = app.get_url_input().into();
+                let url = raw_url.trim().to_owned();
+                // Keep input normalized in UI so copy/paste with trailing spaces still hits cache
+                if raw_url != url {
+                    app.set_url_input(url.clone().into());
+                }
                 match ytdlp::validate_media_url(&url) {
                     Ok(()) => {
                         app.set_url_error("".into());
                         // Try SQLite cache first — instant display, no network.
                         // Thumbnail bytes live under `img_cache/` next to `session.db`.
+                        // Lookup is URL-exact first, then video_id fallback so youtu.be / youtube.com
+                        // variants of the same video still hit the cache.
                         let cached_hit: Option<session::CachedVideo> = session::db_path()
                             .ok()
                             .and_then(|p| session::init_db(&p).ok())
-                            .and_then(|conn| session::get_cached_video(&conn, &url).ok().flatten());
+                            .and_then(|conn| {
+                                if let Some(hit) =
+                                    session::get_cached_video(&conn, &url).ok().flatten()
+                                {
+                                    return Some(hit);
+                                }
+                                if let Some(vid) = ytdlp::extract_video_id(&url) {
+                                    if let Ok(Some(hit)) =
+                                        session::get_cached_video_by_id(&conn, &vid)
+                                    {
+                                        return Some(hit);
+                                    }
+                                }
+                                None
+                            });
                         if let Some(cached) = cached_hit {
                             let duration_str = {
                                 let secs = cached.duration as u64;
@@ -454,6 +483,8 @@ fn main() -> anyhow::Result<()> {
                                 .to_string()
                                 .into(),
                             );
+                            // Prepare per-video work dir for checkpointing (verified on next analyze)
+                            ensure_video_job(&cached.video_id, &url, &cached.title, cached.duration);
                             // Prefer thumbnail persisted in img_cache (same folder as SQLite)
                             let vid = cached.video_id.clone();
                             let cached_thumb_url = cached.thumbnail_url.clone();
@@ -472,6 +503,8 @@ fn main() -> anyhow::Result<()> {
                                 // Cache miss on disk but we have URL — fetch into img_cache in background
                                 let weak3 = app.as_weak();
                                 let vid2 = vid.clone();
+                                let cached_for_update = cached.clone();
+                                let url_for_update = url.clone();
                                 std::thread::spawn(move || {
                                     let rt2 = tokio::runtime::Runtime::new().unwrap();
                                     let _ = rt2.block_on(async {
@@ -488,15 +521,23 @@ fn main() -> anyhow::Result<()> {
                                                 }
                                             }
                                         });
-                                        // Update DB row with thumbnail_path
+                                        // Update DB row with thumbnail_path — handle both exact URL and video_id fallback.
                                         if let Ok(db) = session::db_path()
                                             .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e)))
                                         {
                                             if let Ok(Some(mut cv)) =
-                                                session::get_cached_video(&db, &url)
+                                                session::get_cached_video(&db, &url_for_update)
                                             {
                                                 cv.thumbnail_path =
                                                     Some(path.to_string_lossy().to_string());
+                                                let _ = session::upsert_cached_video(&db, &cv);
+                                            } else {
+                                                // Fallback hit (youtu.be vs youtube.com) — ensure current URL also gets a cache row.
+                                                let mut cv = cached_for_update.clone();
+                                                cv.url = url_for_update.clone();
+                                                cv.thumbnail_path =
+                                                    Some(path.to_string_lossy().to_string());
+                                                cv.fetched_at = chrono::Local::now().to_rfc3339();
                                                 let _ = session::upsert_cached_video(&db, &cv);
                                             }
                                         }
@@ -578,6 +619,12 @@ fn main() -> anyhow::Result<()> {
                                             {
                                                 let _ = session::upsert_cached_video(&db, &cached);
                                             }
+                                            ensure_video_job(
+                                                &info.video_id,
+                                                &url_for_cache,
+                                                &info.title,
+                                                info.duration_secs,
+                                            );
                                             // Thumbnail → img_cache/<video_id>.jpg (same folder as session.db)
                                             if let Some(thumb_url) = info.thumbnail.clone() {
                                                 let weak3 = app_weak2.clone();
@@ -692,10 +739,14 @@ fn main() -> anyhow::Result<()> {
                         return;
                     }
                 }
-                let url: String = app.get_url_input().into();
-                if url.trim().is_empty() {
+                let raw: String = app.get_url_input().into();
+                let url = raw.trim().to_owned();
+                if url.is_empty() {
                     app.set_status_msg(t!("error").to_string().into());
                     return;
+                }
+                if raw != url {
+                    app.set_url_input(url.clone().into());
                 }
                 let cfg = Arc::new(config_rc.borrow().clone());
                 let app_weak2 = app_weak.clone();
@@ -859,7 +910,6 @@ fn main() -> anyhow::Result<()> {
                                             )
                                             .into(),
                                         );
-                                        refresh_home(&app);
                                     }
                                     Err(e) => {
                                         app.set_status_msg(format!("{}: {e}", t!("error")).into());
