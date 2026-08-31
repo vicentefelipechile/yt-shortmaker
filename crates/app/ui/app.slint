@@ -326,6 +326,7 @@ export component MainWindow inherits Window {
     in property <int> analysis-total-steps: 4;
     in property <string> analysis-step-label: "";
     in property <string> analysis-log: "";
+    in property <[string]> analysis-log-lines: [];
     in property <bool> analysis-log-expanded: false;
     in property <float> analysis-anim: 0.0;
 
@@ -611,14 +612,14 @@ export component MainWindow inherits Window {
                                         VerticalLayout {
                                             padding: 8px;
                                             spacing: 2px;
-                                            if root.analysis-log == "": Text {
+                                            if root.analysis-log-lines.length == 0: Text {
                                                 text: root.tr-analysis-log-empty;
                                                 color: #71717a;
                                                 font-size: 11px;
                                                 wrap: word-wrap;
                                             }
-                                            if root.analysis-log != "": Text {
-                                                text: root.analysis-log;
+                                            for line in root.analysis-log-lines: Text {
+                                                text: line;
                                                 color: #d4d4d8;
                                                 font-size: 10px;
                                                 wrap: word-wrap;

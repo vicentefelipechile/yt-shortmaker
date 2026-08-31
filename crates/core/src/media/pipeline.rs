@@ -76,8 +76,8 @@ impl Pipeline {
         let cookies = &cfg.cookies;
         let provider_registry = build_registry(&cfg.ai);
 
-        let video_id = ytdlp::extract_video_id(&ctx.url)
-            .unwrap_or_else(|| format!("video_{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
+        // Stable id: centralized in session::resolve_stable_id — never timestamp/"video"
+        let video_id = session::resolve_stable_id(&ctx.url);
         tracing::info!(
             "pipeline start video_id={} url={} work_dir={}",
             video_id,
@@ -149,9 +149,10 @@ impl Pipeline {
                 "Downloading (low res for analysis)".into(),
             ));
             on_event(PipelineEvent::Log(format!(
-                "yt-dlp: {} -o {} -f worst[ext=mp4]/worst {}",
+                "yt-dlp: {} -o {} -f {} {}",
                 ctx.url,
                 video_path.display(),
+                ytdlp::LOW_RES_FORMAT,
                 if cookies.use_cookies { "(cookies)" } else { "" }
             )));
             if let Err(e) = download_with_logs(
@@ -745,8 +746,7 @@ where
                 )));
                 last_err = Some(e);
                 if attempt + 1 < retry_attempts.max(1) {
-                    let backoff = std::time::Duration::from_secs(1 << attempt);
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(crate::util::exponential_backoff(attempt)).await;
                 }
             }
         }
@@ -773,10 +773,9 @@ where
         .arg("-o")
         .arg(output.to_string_lossy().into_owned());
     if low_res {
-        cmd.arg("-f").arg("worst[ext=mp4]/worst");
+        cmd.arg("-f").arg(ytdlp::LOW_RES_FORMAT);
     } else {
-        cmd.arg("-f")
-            .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
+        cmd.arg("-f").arg(ytdlp::HIGH_RES_FORMAT);
         cmd.arg("--merge-output-format").arg("mp4");
     }
     if use_cookies {
@@ -807,6 +806,8 @@ where
     let mut stderr_done = stderr_lines.is_none();
     let mut stdout_done = stdout_lines.is_none();
     let mut last_pct: Option<f32> = None;
+    let mut last_log_at: Option<std::time::Instant> = None;
+    let mut last_log_line = String::new();
 
     while !stderr_done || !stdout_done {
         tokio::select! {
@@ -814,7 +815,7 @@ where
                 stderr_lines.as_mut().expect("stderr stream exists").next_line().await
             }, if !stderr_done => {
                 match result.context("reading yt-dlp stderr")? {
-                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, on_event),
+                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, &mut last_log_at, &mut last_log_line, on_event),
                     None => stderr_done = true,
                 }
             }
@@ -822,7 +823,7 @@ where
                 stdout_lines.as_mut().expect("stdout stream exists").next_line().await
             }, if !stdout_done => {
                 match result.context("reading yt-dlp stdout")? {
-                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, on_event),
+                    Some(line) => emit_ytdlp_line(&line, &mut last_pct, &mut last_log_at, &mut last_log_line, on_event),
                     None => stdout_done = true,
                 }
             }
@@ -839,14 +840,66 @@ where
     Ok(())
 }
 
-fn emit_ytdlp_line<F>(line: &str, last_pct: &mut Option<f32>, on_event: &mut F)
-where
+fn emit_ytdlp_line<F>(
+    line: &str,
+    last_pct: &mut Option<f32>,
+    last_log_at: &mut Option<std::time::Instant>,
+    last_log_line: &mut String,
+    on_event: &mut F,
+) where
     F: FnMut(PipelineEvent),
 {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
     }
+    let is_progress = trimmed.contains("[download]") && trimmed.contains('%');
+    // Throttle high-frequency download progress lines to ~1 Hz to avoid flooding
+    // Slint's invoke_from_event_loop + Text re-layout on every line. Low-res
+    // downloads emit hundreds of `frag N/M` lines per second and freeze the UI.
+    if is_progress {
+        // Deduplicate identical consecutive lines (common with --newline)
+        if trimmed == last_log_line {
+            // Still allow progress bar to update even if log is suppressed
+            if let Some(p) = parse_ytdlp_progress(trimmed) {
+                let emit = last_pct.is_none_or(|prev| (p - prev).abs() >= 0.005 || p >= 1.0);
+                if emit {
+                    *last_pct = Some(p);
+                    on_event(PipelineEvent::Progress(
+                        p.clamp(0.0, 1.0),
+                        format!("Downloading {:.0}%", p * 100.0),
+                    ));
+                }
+            }
+            return;
+        }
+        let now = std::time::Instant::now();
+        let throttled = last_log_at.is_some_and(|t| now.duration_since(t).as_millis() < 1000);
+        let is_final = trimmed.contains("100%");
+        // Always update progress bar (throttled 0.5%) even when log is suppressed
+        if let Some(p) = parse_ytdlp_progress(trimmed) {
+            let emit = last_pct.is_none_or(|prev| (p - prev).abs() >= 0.005 || p >= 1.0);
+            if emit {
+                *last_pct = Some(p);
+                on_event(PipelineEvent::Progress(
+                    p.clamp(0.0, 1.0),
+                    format!("Downloading {:.0}%", p * 100.0),
+                ));
+            }
+        }
+        // Throttle textual log to ~1 Hz — main cause of UI freeze:
+        // each Log triggers invoke_from_event_loop + get_analysis_log() clone
+        // + set_analysis_log() + Text re-layout (wrap) in app.slint:620.
+        if throttled && !is_final {
+            return;
+        }
+        *last_log_at = Some(now);
+        *last_log_line = trimmed.to_owned();
+        on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
+        return;
+    }
+    // Non-progress lines (Destination, Merging, ERROR, etc.) always emitted
+    *last_log_line = trimmed.to_owned();
     on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
     if let Some(p) = parse_ytdlp_progress(trimmed) {
         let emit = last_pct.is_none_or(|prev| (p - prev).abs() >= 0.005 || p >= 1.0);

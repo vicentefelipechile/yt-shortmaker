@@ -10,6 +10,7 @@ pub mod security;
 pub mod session;
 pub mod setup;
 pub mod types;
+pub mod util;
 
 // Re-export commonly used items at crate root for convenience.
 

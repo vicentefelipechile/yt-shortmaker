@@ -121,7 +121,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
 
 pub fn db_path() -> Result<std::path::PathBuf> {
     let dir = dirs::data_local_dir().context("resolving data_local_dir")?;
-    Ok(dir.join("yt-shortmaker-v2").join("session.db"))
+    Ok(dir.join(crate::config::APP_DIR_NAME).join("session.db"))
 }
 
 /// Directory that holds `session.db` (e.g. `%LOCALAPPDATA%/yt-shortmaker-v2` on Windows).
@@ -157,20 +157,60 @@ pub fn video_work_dir(video_id: &str) -> Result<PathBuf> {
     Ok(db_dir()?.join("videos").join(safe))
 }
 
+/// Same as `video_work_dir` but falls back to temp dir if data_local_dir is unavailable
+/// (centralizes the `unwrap_or_else(|_| temp_dir().join(...))` duplication in app/cli).
+pub fn video_work_dir_or_tmp(video_id: &str) -> PathBuf {
+    video_work_dir(video_id).unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join(crate::config::APP_DIR_NAME)
+            .join(sanitize_id(video_id))
+    })
+}
+
 pub fn video_download_path(video_id: &str) -> Result<PathBuf> {
     Ok(video_work_dir(video_id)?.join(format!("{}.mp4", sanitize_id(video_id))))
 }
 
-fn sanitize_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
+/// Resolve a stable, deterministic video_id for a URL.
+///
+/// Order: 1) authoritative `video_cache` hit (yt-dlp id), 2) `ytdlp::extract_video_id` (YouTube/Twitch/generic),
+/// 3) `ytdlp::hash_url` fallback. Never generates a timestamp/random id — that broke resume ("siempre desde 0").
+pub fn resolve_stable_id(url: &str) -> String {
+    // 1) Exact URL cache hit, then id-variant fallback
+    if let Ok(db) = db_path().and_then(|p| init_db(&p).map_err(|e| anyhow::anyhow!(e.to_string())))
+    {
+        if let Ok(Some(hit)) = get_cached_video(&db, url) {
+            return hit.video_id;
+        }
+        if let Some(vid) = crate::media::ytdlp::extract_video_id(url) {
+            if let Ok(Some(hit)) = get_cached_video_by_id(&db, &vid) {
+                return hit.video_id;
             }
-        })
-        .collect()
+            // No cache — deterministic extract is stable
+            return vid;
+        }
+    } else if let Some(vid) = crate::media::ytdlp::extract_video_id(url) {
+        return vid;
+    }
+    crate::media::ytdlp::hash_url(url)
+}
+
+/// Cached lookup helper: url exact -> id variant, returns the CachedVideo if any.
+pub fn cached_video_for_url(url: &str) -> Result<Option<CachedVideo>> {
+    let conn = init_db(&db_path()?)?;
+    if let Some(hit) = get_cached_video(&conn, url)? {
+        return Ok(Some(hit));
+    }
+    if let Some(vid) = crate::media::ytdlp::extract_video_id(url) {
+        if let Some(hit) = get_cached_video_by_id(&conn, &vid)? {
+            return Ok(Some(hit));
+        }
+    }
+    Ok(None)
+}
+
+fn sanitize_id(id: &str) -> String {
+    crate::util::sanitize_id(id)
 }
 
 // -------------------------------------------------------------------------------------------------

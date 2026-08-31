@@ -47,7 +47,7 @@ impl DependencyStatus {
 /// Directory where the app auto-installs missing tools (yt-dlp, ffmpeg).
 pub fn tools_dir() -> Result<PathBuf> {
     let base = dirs::data_local_dir().context("resolving data_local_dir")?;
-    Ok(base.join("yt-shortmaker-v2").join("tools"))
+    Ok(base.join(crate::config::APP_DIR_NAME).join("tools"))
 }
 
 fn yt_dlp_tools_path() -> Result<PathBuf> {

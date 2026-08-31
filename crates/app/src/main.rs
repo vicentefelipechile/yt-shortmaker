@@ -18,6 +18,8 @@ use yt_shortmaker_core::media::pipeline::{Pipeline, PipelineCtx, PipelineEvent, 
 use yt_shortmaker_core::media::ytdlp;
 use yt_shortmaker_core::{session, setup};
 
+use slint::{Model, ModelRc, SharedString, VecModel};
+
 slint::include_modules!();
 
 // -------------------------------------------------------------------------------------------------
@@ -98,6 +100,86 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_select_model(t!("select_model").to_string().into());
     app.set_tr_delete_model(t!("delete_model").to_string().into());
     app.set_tr_models_title(t!("models_title").to_string().into());
+}
+
+const LOG_RING_CAP: usize = 400;
+
+fn append_log_line(app: &MainWindow, msg: SharedString) {
+    let model = app.get_analysis_log_lines();
+    if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<SharedString>>() {
+        if vec_model.row_count() >= LOG_RING_CAP {
+            vec_model.remove(0);
+        }
+        vec_model.push(msg);
+    } else {
+        // Fallback if model was not a VecModel (e.g. after hot-reload): rebuild
+        let mut lines: Vec<SharedString> = model.iter().collect();
+        if lines.len() >= LOG_RING_CAP {
+            lines.remove(0);
+        }
+        lines.push(msg);
+        app.set_analysis_log_lines(ModelRc::new(VecModel::from(lines)));
+    }
+}
+
+fn clear_log_lines(app: &MainWindow) {
+    app.set_analysis_log_lines(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    // Keep legacy string in sync (not rendered anymore)
+    app.set_analysis_log("".into());
+}
+
+fn spawn_thumbnail_fetch(
+    weak: slint::Weak<MainWindow>,
+    vid: String,
+    thumb_url: String,
+    url: String,
+    cached_fallback: Option<session::CachedVideo>,
+) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt.block_on(async {
+            let resp = reqwest::get(&thumb_url).await?;
+            let bytes = resp.bytes().await?;
+            let path = session::save_thumbnail_to_cache(&vid, &bytes)?;
+            let path_for_img = path.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(a) = weak.upgrade() {
+                    if let Ok(img) = slint::Image::load_from_path(&path_for_img) {
+                        a.set_video_thumbnail_image(img);
+                    }
+                }
+            });
+            if let Ok(db) = session::db_path()
+                .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e)))
+            {
+                if let Ok(Some(mut cv)) = session::get_cached_video(&db, &url) {
+                    cv.thumbnail_path = Some(path.to_string_lossy().to_string());
+                    cv.thumbnail_url = Some(thumb_url.clone());
+                    let _ = session::upsert_cached_video(&db, &cv);
+                } else if let Some(mut fallback) = cached_fallback.clone() {
+                    // Variant fallback (different URL shape for same video)
+                    fallback.url = url.clone();
+                    fallback.thumbnail_path = Some(path.to_string_lossy().to_string());
+                    fallback.thumbnail_url = Some(thumb_url.clone());
+                    fallback.fetched_at = chrono::Local::now().to_rfc3339();
+                    let _ = session::upsert_cached_video(&db, &fallback);
+                } else {
+                    // Minimal row if cache was empty
+                    let cv2 = session::CachedVideo {
+                        url: url.clone(),
+                        video_id: vid.clone(),
+                        title: String::new(),
+                        duration: 0.0,
+                        thumbnail_url: Some(thumb_url.clone()),
+                        thumbnail_path: Some(path.to_string_lossy().to_string()),
+                        fetched_at: chrono::Local::now().to_rfc3339(),
+                    };
+                    let _ = session::upsert_cached_video(&db, &cv2);
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+    });
 }
 
 fn update_deps_ui(app: &MainWindow) -> bool {
@@ -306,9 +388,8 @@ fn refresh_models_list(app: &MainWindow, config: &yt_shortmaker_core::config::Ap
 }
 
 fn work_dir_for(video_id: &str) -> std::path::PathBuf {
-    // Persistent per-video work dir (verified on resume via folder + DB)
-    session::video_work_dir(video_id)
-        .unwrap_or_else(|_| std::env::temp_dir().join("yt-shortmaker-v2").join(video_id))
+    // Delegates to centralized session helper (removes fallback duplication with cli)
+    session::video_work_dir_or_tmp(video_id)
 }
 
 fn ensure_video_job(video_id: &str, url: &str, title: &str, duration: f64) {
@@ -391,6 +472,7 @@ fn main() -> anyhow::Result<()> {
     }
     // Ensure home-recent property exists but not used (no projects list)
     app.set_home_recent_list("".into());
+    clear_log_lines(&app);
 
     let app_weak = app.as_weak();
 
@@ -433,40 +515,12 @@ fn main() -> anyhow::Result<()> {
                 match ytdlp::validate_media_url(&url) {
                     Ok(()) => {
                         app.set_url_error("".into());
-                        // Try SQLite cache first — instant display, no network.
-                        // Thumbnail bytes live under `img_cache/` next to `session.db`.
-                        // Lookup is URL-exact first, then video_id fallback so youtu.be / youtube.com
-                        // variants of the same video still hit the cache.
-                        let cached_hit: Option<session::CachedVideo> = session::db_path()
-                            .ok()
-                            .and_then(|p| session::init_db(&p).ok())
-                            .and_then(|conn| {
-                                if let Some(hit) =
-                                    session::get_cached_video(&conn, &url).ok().flatten()
-                                {
-                                    return Some(hit);
-                                }
-                                if let Some(vid) = ytdlp::extract_video_id(&url) {
-                                    if let Ok(Some(hit)) =
-                                        session::get_cached_video_by_id(&conn, &vid)
-                                    {
-                                        return Some(hit);
-                                    }
-                                }
-                                None
-                            });
+                        // Try SQLite cache first — centralized helper handles url->id variant
+                        let cached_hit: Option<session::CachedVideo> =
+                            session::cached_video_for_url(&url).ok().flatten();
                         if let Some(cached) = cached_hit {
-                            let duration_str = {
-                                let secs = cached.duration as u64;
-                                let h = secs / 3600;
-                                let m = (secs % 3600) / 60;
-                                let s = secs % 60;
-                                if h > 0 {
-                                    format!("{h:02}:{m:02}:{s:02}")
-                                } else {
-                                    format!("{m:02}:{s:02}")
-                                }
-                            };
+                            let duration_str =
+                                yt_shortmaker_core::util::format_duration(cached.duration as u64);
                             app.set_video_title(cached.title.clone().into());
                             app.set_video_id(cached.video_id.clone().into());
                             app.set_video_duration(duration_str.clone().into());
@@ -484,7 +538,12 @@ fn main() -> anyhow::Result<()> {
                                 .into(),
                             );
                             // Prepare per-video work dir for checkpointing (verified on next analyze)
-                            ensure_video_job(&cached.video_id, &url, &cached.title, cached.duration);
+                            ensure_video_job(
+                                &cached.video_id,
+                                &url,
+                                &cached.title,
+                                cached.duration,
+                            );
                             // Prefer thumbnail persisted in img_cache (same folder as SQLite)
                             let vid = cached.video_id.clone();
                             let cached_thumb_url = cached.thumbnail_url.clone();
@@ -500,50 +559,13 @@ fn main() -> anyhow::Result<()> {
                                     app.set_video_thumbnail_image(img);
                                 }
                             } else if let Some(thumb_url) = cached_thumb_url {
-                                // Cache miss on disk but we have URL — fetch into img_cache in background
-                                let weak3 = app.as_weak();
-                                let vid2 = vid.clone();
-                                let cached_for_update = cached.clone();
-                                let url_for_update = url.clone();
-                                std::thread::spawn(move || {
-                                    let rt2 = tokio::runtime::Runtime::new().unwrap();
-                                    let _ = rt2.block_on(async {
-                                        let resp = reqwest::get(&thumb_url).await?;
-                                        let bytes = resp.bytes().await?;
-                                        let path = session::save_thumbnail_to_cache(&vid2, &bytes)?;
-                                        let path_for_img = path.clone();
-                                        let _ = slint::invoke_from_event_loop(move || {
-                                            if let Some(a) = weak3.upgrade() {
-                                                if let Ok(img) =
-                                                    slint::Image::load_from_path(&path_for_img)
-                                                {
-                                                    a.set_video_thumbnail_image(img);
-                                                }
-                                            }
-                                        });
-                                        // Update DB row with thumbnail_path — handle both exact URL and video_id fallback.
-                                        if let Ok(db) = session::db_path()
-                                            .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e)))
-                                        {
-                                            if let Ok(Some(mut cv)) =
-                                                session::get_cached_video(&db, &url_for_update)
-                                            {
-                                                cv.thumbnail_path =
-                                                    Some(path.to_string_lossy().to_string());
-                                                let _ = session::upsert_cached_video(&db, &cv);
-                                            } else {
-                                                // Fallback hit (youtu.be vs youtube.com) — ensure current URL also gets a cache row.
-                                                let mut cv = cached_for_update.clone();
-                                                cv.url = url_for_update.clone();
-                                                cv.thumbnail_path =
-                                                    Some(path.to_string_lossy().to_string());
-                                                cv.fetched_at = chrono::Local::now().to_rfc3339();
-                                                let _ = session::upsert_cached_video(&db, &cv);
-                                            }
-                                        }
-                                        Ok::<(), anyhow::Error>(())
-                                    });
-                                });
+                                spawn_thumbnail_fetch(
+                                    app.as_weak(),
+                                    vid.clone(),
+                                    thumb_url,
+                                    url.clone(),
+                                    Some(cached.clone()),
+                                );
                             }
                             return;
                         }
@@ -574,17 +596,10 @@ fn main() -> anyhow::Result<()> {
                                 if let Some(app) = app_weak2.upgrade() {
                                     match res {
                                         Ok(info) => {
-                                            let duration_str = {
-                                                let secs = info.duration_secs as u64;
-                                                let h = secs / 3600;
-                                                let m = (secs % 3600) / 60;
-                                                let s = secs % 60;
-                                                if h > 0 {
-                                                    format!("{h:02}:{m:02}:{s:02}")
-                                                } else {
-                                                    format!("{m:02}:{s:02}")
-                                                }
-                                            };
+                                            let duration_str =
+                                                yt_shortmaker_core::util::format_duration(
+                                                    info.duration_secs as u64,
+                                                );
                                             app.set_video_title(info.title.clone().into());
                                             app.set_video_id(info.video_id.clone().into());
                                             app.set_video_duration(duration_str.clone().into());
@@ -612,11 +627,9 @@ fn main() -> anyhow::Result<()> {
                                                 thumbnail_path: None,
                                                 fetched_at: chrono::Local::now().to_rfc3339(),
                                             };
-                                            if let Ok(db) = session::db_path()
-                                                .and_then(|p| {
-                                                    session::init_db(&p).map_err(|e| anyhow::anyhow!(e))
-                                                })
-                                            {
+                                            if let Ok(db) = session::db_path().and_then(|p| {
+                                                session::init_db(&p).map_err(|e| anyhow::anyhow!(e))
+                                            }) {
                                                 let _ = session::upsert_cached_video(&db, &cached);
                                             }
                                             ensure_video_job(
@@ -625,81 +638,15 @@ fn main() -> anyhow::Result<()> {
                                                 &info.title,
                                                 info.duration_secs,
                                             );
-                                            // Thumbnail → img_cache/<video_id>.jpg (same folder as session.db)
+                                            // Thumbnail → img_cache/<video_id>.jpg (centralized)
                                             if let Some(thumb_url) = info.thumbnail.clone() {
-                                                let weak3 = app_weak2.clone();
-                                                let vid = info.video_id.clone();
-                                                let url_c = url_for_cache.clone();
-                                                let thumb_url_c = thumb_url.clone();
-                                                std::thread::spawn(move || {
-                                                    let rt2 = tokio::runtime::Runtime::new().unwrap();
-                                                    let img_res = rt2.block_on(async {
-                                                        let resp = reqwest::get(&thumb_url).await?;
-                                                        let bytes = resp.bytes().await?;
-                                                        let path =
-                                                            session::save_thumbnail_to_cache(
-                                                                &vid, &bytes,
-                                                            )?;
-                                                        // Update DB row with local path
-                                                        if let Ok(db) = session::db_path().and_then(
-                                                            |p| {
-                                                                session::init_db(&p)
-                                                                    .map_err(|e| anyhow::anyhow!(e))
-                                                            },
-                                                        ) {
-                                                            if let Ok(Some(mut cv)) =
-                                                                session::get_cached_video(&db, &url_c)
-                                                            {
-                                                                cv.thumbnail_path = Some(
-                                                                    path.to_string_lossy().to_string(),
-                                                                );
-                                                                cv.thumbnail_url =
-                                                                    Some(thumb_url_c.clone());
-                                                                let _ = session::upsert_cached_video(
-                                                                    &db, &cv,
-                                                                );
-                                                            } else {
-                                                                // No row yet (race) — insert minimal
-                                                                let cv2 = session::CachedVideo {
-                                                                    url: url_c.clone(),
-                                                                    video_id: vid.clone(),
-                                                                    title: String::new(),
-                                                                    duration: 0.0,
-                                                                    thumbnail_url: Some(
-                                                                        thumb_url_c.clone(),
-                                                                    ),
-                                                                    thumbnail_path: Some(
-                                                                        path.to_string_lossy()
-                                                                            .to_string(),
-                                                                    ),
-                                                                    fetched_at: chrono::Local::now()
-                                                                        .to_rfc3339(),
-                                                                };
-                                                                let _ =
-                                                                    session::upsert_cached_video(
-                                                                        &db, &cv2,
-                                                                    );
-                                                            }
-                                                        }
-                                                        Ok::<std::path::PathBuf, anyhow::Error>(path)
-                                                    });
-                                                    if let Ok(path) = img_res {
-                                                        let _ = slint::invoke_from_event_loop(
-                                                            move || {
-                                                                if let Some(a) = weak3.upgrade() {
-                                                                    if let Ok(img) =
-                                                                        slint::Image::load_from_path(
-                                                                            &path,
-                                                                        ) {
-                                                                        a.set_video_thumbnail_image(
-                                                                            img,
-                                                                        );
-                                                                    }
-                                                                }
-                                                            },
-                                                        );
-                                                    }
-                                                });
+                                                spawn_thumbnail_fetch(
+                                                    app_weak2.clone(),
+                                                    info.video_id.clone(),
+                                                    thumb_url,
+                                                    url_for_cache.clone(),
+                                                    None,
+                                                );
                                             }
                                         }
                                         Err(e) => {
@@ -756,7 +703,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_analysis_current_step(1);
                 app.set_analysis_total_steps(4);
                 app.set_analysis_step_label(t!("analysis_step_downloading").to_string().into());
-                app.set_analysis_log("".into());
+                clear_log_lines(&app);
                 app.set_analysis_log_expanded(false);
                 app.set_analysis_anim(0.0);
                 app.set_status_msg(format!("1/4 - {}", t!("analysis_step_downloading")).into());
@@ -794,11 +741,8 @@ fn main() -> anyhow::Result<()> {
                     let events_weak = app_weak2.clone();
                     let done_weak = app_weak2.clone();
                     rt.block_on(async move {
-                        let work_dir = work_dir_for(
-                            ytdlp::extract_video_id(&url)
-                                .unwrap_or_else(|| "video".to_string())
-                                .as_str(),
-                        );
+                        let stable_id = session::resolve_stable_id(&url);
+                        let work_dir = session::video_work_dir_or_tmp(stable_id.as_str());
                         let output_dir = cfg
                             .output_dir
                             .clone()
@@ -823,25 +767,9 @@ fn main() -> anyhow::Result<()> {
                                                     app.set_status_msg(msg.into());
                                                 }
                                                 PipelineEvent::Log(msg) => {
-                                                    // Accumulate into collapsible technical log (yt-dlp / ffmpeg)
-                                                    let prev: String =
-                                                        app.get_analysis_log().into();
-                                                    let mut next = if prev.is_empty() {
-                                                        msg.clone()
-                                                    } else {
-                                                        format!("{prev}\n{msg}")
-                                                    };
-                                                    // Keep log bounded (~8000 chars) to avoid UI blowup
-                                                    if next.len() > 8000 {
-                                                        let start = next.len() - 8000;
-                                                        // find next newline to avoid cutting mid-line
-                                                        let cut = next[start..]
-                                                            .find('\n')
-                                                            .map(|i| start + i + 1)
-                                                            .unwrap_or(start);
-                                                        next = next[cut..].to_string();
-                                                    }
-                                                    app.set_analysis_log(next.into());
+                                                    // Append-only ring buffer: each line is a row -> O(1) push,
+                                                    // no re-layout of the whole 8000-char block (see app.slint:605)
+                                                    append_log_line(&app, msg.into());
                                                 }
                                                 PipelineEvent::StageChanged(stage) => {
                                                     let (step, label) = match stage {
@@ -875,15 +803,10 @@ fn main() -> anyhow::Result<()> {
                                                         format!("{step}/4 - {label}").into(),
                                                     );
                                                     // Also push stage label into technical log
-                                                    let prev: String =
-                                                        app.get_analysis_log().into();
-                                                    let line = format!("-- {} --", label);
-                                                    let next = if prev.is_empty() {
-                                                        line
-                                                    } else {
-                                                        format!("{prev}\n{line}")
-                                                    };
-                                                    app.set_analysis_log(next.into());
+                                                    append_log_line(
+                                                        &app,
+                                                        format!("-- {} --", label).into(),
+                                                    );
                                                 }
                                             }
                                         }
@@ -1365,18 +1288,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 };
-                let id = model_id_raw
-                    .to_lowercase()
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() { c } else { '-' })
-                    .collect::<String>()
-                    .trim_matches('-')
-                    .to_string();
-                let id = if id.is_empty() {
-                    format!("model-{}", chrono::Local::now().format("%H%M%S"))
-                } else {
-                    id
-                };
+                let mut id = yt_shortmaker_core::config::slugify_pub(&model_id_raw);
+                if id.is_empty() {
+                    id = format!("model-{}", chrono::Local::now().format("%H%M%S"));
+                }
                 let mut cfg = config_rc.borrow_mut();
                 if cfg.ai.custom_models.iter().any(|m| m.id == id) {
                     app.set_models_status(

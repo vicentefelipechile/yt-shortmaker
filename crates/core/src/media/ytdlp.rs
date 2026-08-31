@@ -3,12 +3,14 @@
 // =================================================================================================
 
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+pub const LOW_RES_FORMAT: &str = "worst[ext=mp4]/worst";
+pub const HIGH_RES_FORMAT: &str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -27,9 +29,76 @@ pub struct VideoInfo {
 // -------------------------------------------------------------------------------------------------
 
 pub fn extract_video_id(url: &str) -> Option<String> {
-    let re = Regex::new(r"(?:v=|/)([0-9A-Za-z_-]{11}).*").ok()?;
-    re.captures(url)
-        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // 1. YouTube 11-char id (v= or /)
+    if let Ok(re) = Regex::new(r"(?:v=|/)([0-9A-Za-z_-]{11})(?:[&#?/]|$)") {
+        if let Some(cap) = re.captures(trimmed) {
+            if let Some(m) = cap.get(1) {
+                return Some(m.as_str().to_string());
+            }
+        }
+    }
+    // 2. Twitch VOD: https://www.twitch.tv/videos/2859440809 -> v2859440809 (matches yt-dlp id)
+    if let Ok(re) = Regex::new(r"twitch\.tv/videos/(\d{6,})") {
+        if let Some(cap) = re.captures(trimmed) {
+            if let Some(m) = cap.get(1) {
+                // yt-dlp prefixes Twitch VODs with 'v'
+                return Some(format!("v{}", m.as_str()));
+            }
+        }
+    }
+    // 3. Generic fallback only for http(s) URLs — "not a url" must stay None for validate tests
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return None;
+    }
+    // Last path segment (e.g. https://example.com/media/abc123?x=1 -> abc123)
+    // Extract last non-empty segment before query/fragment
+    let without_query = trimmed
+        .split('?')
+        .next()
+        .unwrap_or(trimmed)
+        .split('#')
+        .next()
+        .unwrap_or(trimmed);
+    let without_trailing = without_query.trim_end_matches('/');
+    if let Some(last) = without_trailing.rsplit('/').next() {
+        // Strip extension if any (e.g. video.mp4)
+        let candidate = last.split('.').next().unwrap_or(last);
+        // Must be plausible id length and charset
+        if candidate.len() >= 4
+            && candidate.len() <= 64
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            // Avoid returning generic words like "videos" / "watch"
+            let lower = candidate.to_ascii_lowercase();
+            if lower != "videos"
+                && lower != "watch"
+                && lower != "video"
+                && lower != "embed"
+                && lower != "shorts"
+                && lower != "live"
+            {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    // 4. Deterministic hash fallback (FNV-1a 64) -> url_{hex}, stable across runs
+    // This is the crucial fix for the "always from 0" bug: previously used chrono timestamp
+    // which generated a new video_id per run, breaking folder+DB verification.
+    Some(format!("url_{:016x}", fnv1a_hash(trimmed)))
+}
+
+pub fn fnv1a_hash(s: &str) -> u64 {
+    crate::util::fnv1a_hash(s)
+}
+
+pub fn hash_url(url: &str) -> String {
+    crate::util::hash_url(url)
 }
 
 pub fn validate_media_url(url: &str) -> Result<()> {
@@ -63,8 +132,7 @@ pub async fn fetch_info(
             Err(e) => {
                 last_err = Some(e);
                 if attempt + 1 < retry_attempts.max(1) {
-                    let backoff = Duration::from_secs(1 << attempt);
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(crate::util::exponential_backoff(attempt)).await;
                 }
             }
         }
@@ -160,8 +228,7 @@ pub async fn download_video(
             Err(e) => {
                 last_err = Some(e);
                 if attempt + 1 < retry_attempts.max(1) {
-                    let backoff = Duration::from_secs(1 << attempt);
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(crate::util::exponential_backoff(attempt)).await;
                 }
             }
         }
@@ -181,10 +248,9 @@ async fn download_video_once(
         .arg("-o")
         .arg(output.to_string_lossy().into_owned());
     if low_res {
-        cmd.arg("-f").arg("worst[ext=mp4]/worst");
+        cmd.arg("-f").arg(LOW_RES_FORMAT);
     } else {
-        cmd.arg("-f")
-            .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
+        cmd.arg("-f").arg(HIGH_RES_FORMAT);
         cmd.arg("--merge-output-format").arg("mp4");
     }
     if use_cookies {
