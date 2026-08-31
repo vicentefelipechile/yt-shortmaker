@@ -329,6 +329,7 @@ export component MainWindow inherits Window {
     in property <[string]> analysis-log-lines: [];
     in property <bool> analysis-log-expanded: false;
     in property <float> analysis-anim: 0.0;
+    in-out property <length> analysis-log-scroll-y: 0px;
 
     callback navigate(string);
     callback fetch-info();
@@ -604,11 +605,12 @@ export component MainWindow inherits Window {
                                     TouchArea { clicked => { root.toggle-analysis-log(); } }
                                 }
                                 if root.analysis-log-expanded: Rectangle {
-                                    height: 150px;
+                                    height: 300px;
                                     background: #121214;
                                     border-width: 1px;
                                     border-color: #27272a;
                                     ScrollView {
+                                        viewport-y: root.analysis-log-scroll-y;
                                         VerticalLayout {
                                             padding: 8px;
                                             spacing: 2px;

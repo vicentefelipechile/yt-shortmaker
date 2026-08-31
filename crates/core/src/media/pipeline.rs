@@ -380,14 +380,48 @@ impl Pipeline {
             );
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::ai::ProviderEvent>();
             let chunk_start = std::time::Instant::now();
-            let chunk_res = provider
-                .analyze_chunk(crate::ai::AnalyzeCtx {
-                    chunk_path: PathBuf::from(&vc.file_path),
-                    chunk_start_offset: std::time::Duration::from_secs(vc.start_seconds),
-                    cancellation: ctx.cancellation.clone(),
-                    progress_tx: Some(tx),
-                })
-                .await;
+            // Run provider future concurrently with log/progress forwarding so the UI
+            // sees `Waiting for file ACTIVE (poll N)` etc. in real time instead of
+            // buffering until the chunk finishes (previously caused 60s of silence
+            // before the timeout error appeared).
+            let analyze_fut = provider.analyze_chunk(crate::ai::AnalyzeCtx {
+                chunk_path: PathBuf::from(&vc.file_path),
+                chunk_start_offset: std::time::Duration::from_secs(vc.start_seconds),
+                cancellation: ctx.cancellation.clone(),
+                progress_tx: Some(tx),
+            });
+            tokio::pin!(analyze_fut);
+            let chunk_res: anyhow::Result<Vec<crate::types::VideoMoment>> = loop {
+                tokio::select! {
+                    res = &mut analyze_fut => break res,
+                    ev = rx.recv() => {
+                        match ev {
+                            Some(crate::ai::ProviderEvent::Log(msg)) => on_event(PipelineEvent::Log(msg)),
+                            Some(crate::ai::ProviderEvent::Progress(p)) => {
+                                let blended = (i as f32 + p.clamp(0.0, 1.0)) / total as f32;
+                                on_event(PipelineEvent::Progress(
+                                    blended,
+                                    format!("AI {:.0}%", p * 100.0),
+                                ));
+                            }
+                            None => continue,
+                        }
+                    }
+                }
+            };
+            // Drain any trailing events buffered after the future completed
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    crate::ai::ProviderEvent::Log(msg) => on_event(PipelineEvent::Log(msg)),
+                    crate::ai::ProviderEvent::Progress(p) => {
+                        let blended = (i as f32 + p.clamp(0.0, 1.0)) / total as f32;
+                        on_event(PipelineEvent::Progress(
+                            blended,
+                            format!("AI {:.0}%", p * 100.0),
+                        ));
+                    }
+                }
+            }
             let chunk_moments = match chunk_res {
                 Ok(m) => {
                     tracing::info!(
@@ -403,18 +437,6 @@ impl Pipeline {
                     return Err(e.context(format!("chunk {} analyze failed", i)));
                 }
             };
-            while let Ok(ev) = rx.try_recv() {
-                match ev {
-                    crate::ai::ProviderEvent::Log(msg) => on_event(PipelineEvent::Log(msg)),
-                    crate::ai::ProviderEvent::Progress(p) => {
-                        let blended = (i as f32 + p.clamp(0.0, 1.0)) / total as f32;
-                        on_event(PipelineEvent::Progress(
-                            blended,
-                            format!("AI {:.0}%", p * 100.0),
-                        ));
-                    }
-                }
-            }
 
             tracing::info!(
                 "chunk {} found {} moments, persisting",

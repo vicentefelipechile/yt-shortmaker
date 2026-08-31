@@ -35,7 +35,7 @@ const GEMINI_ID: &str = "gemini";
 const GEMINI_DISPLAY: &str = "Google Gemini";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const UPLOAD_BASE: &str = "https://generativelanguage.googleapis.com/upload/v1beta";
-const FILE_ACTIVE_TIMEOUT: Duration = Duration::from_secs(60);
+const FILE_ACTIVE_TIMEOUT: Duration = Duration::from_secs(180);
 const FILE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_MIME: &str = "video/mp4";
 
@@ -167,26 +167,81 @@ impl GeminiProvider {
             ctx,
             format!("Waiting for file {file_name} to become ACTIVE"),
         );
+        tracing::info!(
+            "Gemini poll start file={} timeout={:?}",
+            file_name,
+            FILE_ACTIVE_TIMEOUT
+        );
         let client = reqwest::Client::new();
         let deadline = tokio::time::Instant::now() + FILE_ACTIVE_TIMEOUT;
+        // file_name from upload is typically "files/abc123" — handle both forms
+        // to avoid double prefix "files/files/abc123" which returns 404 and
+        // caused the generic timeout loop.
+        let normalized = if file_name.starts_with("files/") {
+            file_name.to_owned()
+        } else {
+            format!("files/{file_name}")
+        };
+        let url = format!("{API_BASE}/{normalized}?key={key}");
+        let mut poll_count: u32 = 0;
         loop {
-            let resp = client
-                .get(format!("{API_BASE}/files/{file_name}?key={key}"))
-                .send()
-                .await
-                .context("querying file state")?;
+            poll_count += 1;
+            let resp = client.get(&url).send().await.with_context(|| {
+                format!("querying file state for {file_name} (poll #{poll_count})")
+            })?;
+            let status = resp.status();
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            if !status.is_success() {
+                let msg = format!("file state query failed ({status}): {body}");
+                tracing::warn!("{}", msg);
+                // Retry transient errors (429/5xx) until deadline; bail on hard 4xx like 404
+                if status.as_u16() == 404 || status.as_u16() == 400 || status.as_u16() == 403 {
+                    anyhow::bail!(msg);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "timed out waiting for file to become ACTIVE (last error: {msg})"
+                    );
+                }
+                tracing::debug!("poll #{poll_count} transient error, retrying");
+                tokio::time::sleep(FILE_POLL_INTERVAL).await;
+                continue;
+            }
             let state = body["file"]["state"].as_str().unwrap_or("");
+            tracing::debug!(
+                "poll #{poll_count} file={} state={:?} body={}",
+                file_name,
+                state,
+                body
+            );
             match state {
                 "ACTIVE" => {
                     send_log(ctx, "File ACTIVE");
                     send_progress(ctx, 0.6);
+                    tracing::info!("file ACTIVE after {} polls", poll_count);
                     return Ok(());
                 }
                 "FAILED" => anyhow::bail!("file processing failed: {body}"),
                 _ => {
+                    // Covers "PROCESSING" and empty string (API still indexing)
+                    // No send_log here — polling cada 2s generaria spam en la UI
+                    // (hasta 90 lineas por chunk). Solo tracing para debug.
+                    if poll_count == 1 || poll_count % 10 == 0 {
+                        tracing::debug!(
+                            "still waiting for ACTIVE poll={poll_count} state={state:?}"
+                        );
+                    }
                     if tokio::time::Instant::now() >= deadline {
-                        anyhow::bail!("timed out waiting for file to become ACTIVE");
+                        anyhow::bail!(
+                            "timed out waiting for file to become ACTIVE after {} polls (last state={:?}, body={})",
+                            poll_count,
+                            state,
+                            body
+                        );
+                    }
+                    // Gracefully handle cancellation during long poll
+                    if ctx.cancellation.is_cancelled() {
+                        anyhow::bail!("cancelled while waiting for file ACTIVE");
                     }
                     tokio::time::sleep(FILE_POLL_INTERVAL).await;
                 }
@@ -223,7 +278,7 @@ impl GeminiProvider {
                 "role": "user",
                 "parts": [
                     { "text": user_prompt },
-                    { "inlineData": { "fileUri": file_uri, "mimeType": CHUNK_MIME } }
+                    { "fileData": { "fileUri": file_uri, "mimeType": CHUNK_MIME } }
                 ]
             }],
             "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
@@ -275,10 +330,39 @@ impl GeminiProvider {
         Ok(out)
     }
 
+    async fn delete_file(&self, file_name: &str, key: &str) {
+        let normalized = if file_name.starts_with("files/") {
+            file_name.to_owned()
+        } else {
+            format!("files/{file_name}")
+        };
+        let url = format!("{API_BASE}/{normalized}?key={key}");
+        let res = reqwest::Client::new().delete(&url).send().await;
+        match res {
+            Ok(r) if r.status().is_success() => {
+                tracing::debug!("deleted remote file {file_name}");
+            }
+            Ok(r) => {
+                let st = r.status();
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                tracing::debug!("delete file {file_name} failed {st}: {body}");
+            }
+            Err(e) => tracing::debug!("delete file {file_name} error: {e:#}"),
+        }
+    }
+
     async fn analyze_with_key(&self, ctx: &AnalyzeCtx, key: &str) -> Result<Vec<VideoMoment>> {
         let (file_name, file_uri) = self.upload_file(ctx, key).await?;
-        self.wait_for_file_active(ctx, &file_name, key).await?;
-        let moments = self.generate_moments(ctx, &file_uri, key).await?;
+        let wait_res = self.wait_for_file_active(ctx, &file_name, key).await;
+        if let Err(e) = wait_res {
+            // Best-effort cleanup to avoid leaking files on quota/timeout
+            self.delete_file(&file_name, key).await;
+            return Err(e);
+        }
+        let gen_res = self.generate_moments(ctx, &file_uri, key).await;
+        // Always try to delete remote file (quota) — ignore errors
+        self.delete_file(&file_name, key).await;
+        let moments = gen_res?;
         send_progress(ctx, 1.0);
         Ok(moments)
     }

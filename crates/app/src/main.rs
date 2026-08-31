@@ -104,7 +104,38 @@ fn apply_translations(app: &MainWindow) {
 
 const LOG_RING_CAP: usize = 400;
 
+fn should_stick_to_bottom(app: &MainWindow) -> bool {
+    if !app.get_analysis_log_expanded() {
+        return true;
+    }
+    let scroll_y = app.get_analysis_log_scroll_y();
+    let count = app.get_analysis_log_lines().iter().count() as f32;
+    // Estimate: each Text ~14px (10px font + 2px spacing + 2px padding)
+    let line_h: f32 = 14.0;
+    let content_h = count * line_h + 16.0;
+    let viewport_h: f32 = 300.0;
+    if content_h <= viewport_h {
+        return true;
+    }
+    let bottom: f32 = -(content_h - viewport_h);
+    // Consider at bottom if within 40px threshold
+    scroll_y <= bottom + 40.0
+}
+
+fn scroll_to_bottom(app: &MainWindow) {
+    let count = app.get_analysis_log_lines().iter().count() as f32;
+    let content_h = count * 14.0 + 16.0;
+    let viewport_h: f32 = 300.0;
+    let bottom: f32 = if content_h <= viewport_h {
+        0.0
+    } else {
+        -(content_h - viewport_h)
+    };
+    app.set_analysis_log_scroll_y(bottom);
+}
+
 fn append_log_line(app: &MainWindow, msg: SharedString) {
+    let stick = should_stick_to_bottom(app);
     let model = app.get_analysis_log_lines();
     if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<SharedString>>() {
         if vec_model.row_count() >= LOG_RING_CAP {
@@ -120,12 +151,16 @@ fn append_log_line(app: &MainWindow, msg: SharedString) {
         lines.push(msg);
         app.set_analysis_log_lines(ModelRc::new(VecModel::from(lines)));
     }
+    if stick {
+        scroll_to_bottom(app);
+    }
 }
 
 fn clear_log_lines(app: &MainWindow) {
     app.set_analysis_log_lines(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     // Keep legacy string in sync (not rendered anymore)
     app.set_analysis_log("".into());
+    app.set_analysis_log_scroll_y(0.0);
 }
 
 fn spawn_thumbnail_fetch(
@@ -1137,7 +1172,11 @@ fn main() -> anyhow::Result<()> {
         move || {
             if let Some(app) = app_weak.upgrade() {
                 let cur = app.get_analysis_log_expanded();
-                app.set_analysis_log_expanded(!cur);
+                let next = !cur;
+                app.set_analysis_log_expanded(next);
+                if next {
+                    scroll_to_bottom(&app);
+                }
             }
         }
     });
