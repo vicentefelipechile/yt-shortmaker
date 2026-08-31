@@ -39,12 +39,11 @@ const FILE_ACTIVE_TIMEOUT: Duration = Duration::from_secs(180);
 const FILE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_MIME: &str = "video/mp4";
 
-const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Your task is to analyze the provided
-video chunk and identify the best moments suitable for YouTube Shorts.
-1. Duration: 10 seconds to 90 seconds per moment.
-2. Each moment must be self-contained (start and end timestamps).
+const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
+1. Duration: 10 to 90 seconds per moment.
+2. Each moment must be self-contained (start and end).
 3. Prioritize: hooks, funny/emotional moments, strong statements, plot twists, valuable info.
-4. Return timestamps in HH:MM:SS format, relative to the start of the provided video chunk."#;
+Timestamps and schema compliance are enforced via the JSON schema — follow its descriptions."#;
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -207,7 +206,17 @@ impl GeminiProvider {
                 tokio::time::sleep(FILE_POLL_INTERVAL).await;
                 continue;
             }
-            let state = body["file"]["state"].as_str().unwrap_or("");
+            // GET /v1beta/files/{id} returns top-level fields (no "file" wrapper),
+            // while upload returns { "file": {...} }. Handle both shapes.
+            let state = body
+                .get("state")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    body.get("file")
+                        .and_then(|f| f.get("state"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("");
             tracing::debug!(
                 "poll #{poll_count} file={} state={:?} body={}",
                 file_name,
@@ -258,8 +267,7 @@ impl GeminiProvider {
     ) -> Result<Vec<VideoMoment>> {
         send_log(ctx, "Calling generateContent");
         let user_prompt =
-            "Analyze this video chunk and identify the best moments for YouTube Shorts. \
-             Return timestamps relative to the start of this provided video chunk (00:00:00)."
+            "Analyze this video chunk and identify the best moments for YouTube Shorts."
                 .to_string();
 
         let mut generation_config = json!({
@@ -399,29 +407,62 @@ fn response_schema() -> serde_json::Value {
         "properties": {
             "moments": {
                 "type": "ARRAY",
+                "description": "List of best moments suitable for YouTube Shorts",
                 "items": {
                     "type": "OBJECT",
                     "properties": {
-                        "start_time": { "type": "STRING" },
-                        "end_time": { "type": "STRING" },
-                        "category": { "type": "STRING" },
-                        "description": { "type": "STRING" },
+                        "start_time": {
+                            "type": "STRING",
+                            "description": "Start timestamp in HH:MM:SS (e.g. 00:01:23) relative to chunk start 00:00:00",
+                            "format": "time"
+                        },
+                        "end_time": {
+                            "type": "STRING",
+                            "description": "End timestamp in HH:MM:SS (e.g. 00:01:45) relative to chunk start, 10-90s after start_time",
+                            "format": "time"
+                        },
+                        "category": {
+                            "type": "STRING",
+                            "description": "Category of the moment",
+                            "enum": ["Hook", "Funny", "Emotional", "Information", "Plot Twist", "Valuable Info", "Other"]
+                        },
+                        "description": {
+                            "type": "STRING",
+                            "description": "Brief description of why this moment is good for a Short"
+                        },
                         "dialogue": {
                             "type": "ARRAY",
+                            "description": "Key spoken phrases within the moment",
                             "items": {
                                 "type": "OBJECT",
                                 "properties": {
-                                    "start_time": { "type": "STRING" },
-                                    "end_time": { "type": "STRING" },
-                                    "phrase": { "type": "STRING" }
-                                }
+                                    "start_time": {
+                                        "type": "STRING",
+                                        "description": "Phrase start in HH:MM:SS relative to chunk start",
+                                        "format": "time"
+                                    },
+                                    "end_time": {
+                                        "type": "STRING",
+                                        "description": "Phrase end in HH:MM:SS relative to chunk start",
+                                        "format": "time"
+                                    },
+                                    "phrase": {
+                                        "type": "STRING",
+                                        "description": "Exact spoken phrase"
+                                    }
+                                },
+                                "required": ["start_time", "end_time", "phrase"],
+                                "propertyOrdering": ["start_time", "end_time", "phrase"]
                             }
                         }
                     },
-                    "required": ["start_time", "end_time", "category", "description"]
+                    "required": ["start_time", "end_time", "category", "description"],
+                    "propertyOrdering": ["start_time", "end_time", "category", "description", "dialogue"]
                 }
             }
-        }
+        },
+        "required": ["moments"],
+        "propertyOrdering": ["moments"]
     })
 }
 
@@ -454,22 +495,60 @@ impl AiProvider for GeminiProvider {
     }
 
     async fn analyze_chunk(&self, ctx: AnalyzeCtx) -> Result<Vec<VideoMoment>> {
-        // Sticky key per attempt; rotate to another key on quota errors (429).
+        // Error handling tiers:
+        // - permanent (400/401/403/404): fail fast
+        // - quota (429/RESOURCE_EXHAUSTED): disable key and try next key
+        // - transient (500/502/503/504/UNAVAILABLE/high demand): retry same key with exponential backoff
+        const MAX_TRANSIENT_RETRIES: u32 = 3;
         let mut last_err: Option<anyhow::Error> = None;
         while let Some(idx) = self.next_key_index() {
             if ctx.cancellation.is_cancelled() {
                 anyhow::bail!("cancelled");
             }
             let key = &self.keys[idx].1;
-            match self.analyze_with_key(&ctx, key).await {
-                Ok(moments) => return Ok(moments),
-                Err(e) => {
-                    if is_quota_error(&e) {
-                        self.mark_disabled(idx);
-                        last_err = Some(e);
-                        continue;
+            let mut attempt: u32 = 0;
+            loop {
+                match self.analyze_with_key(&ctx, key).await {
+                    Ok(moments) => return Ok(moments),
+                    Err(e) => {
+                        if is_quota_error(&e) {
+                            self.mark_disabled(idx);
+                            tracing::warn!("quota exhausted on key {idx}, rotating: {e:#}");
+                            send_log(&ctx, format!("Quota hit (key {idx}), switching key..."));
+                            last_err = Some(e);
+                            break; // next key
+                        }
+                        if is_transient_error(&e) {
+                            if attempt >= MAX_TRANSIENT_RETRIES {
+                                tracing::warn!(
+                                    "transient error exhausted retries ({MAX_TRANSIENT_RETRIES}) on key {idx}: {e:#}"
+                                );
+                                last_err = Some(e);
+                                break; // try next key if available
+                            }
+                            attempt += 1;
+                            let backoff = crate::util::exponential_backoff(attempt)
+                                .min(Duration::from_secs(30));
+                            let msg = format!(
+                                "Transient error, retry {attempt}/{MAX_TRANSIENT_RETRIES} after {}s: {}",
+                                backoff.as_secs(),
+                                short_error(&e)
+                            );
+                            send_log(&ctx, msg.clone());
+                            tracing::warn!("{} (key {idx}): {e:#}", msg);
+                            // Respect cancellation during backoff
+                            tokio::select! {
+                                _ = tokio::time::sleep(backoff) => {},
+                                _ = ctx.cancellation.cancelled() => anyhow::bail!("cancelled"),
+                            }
+                            if ctx.cancellation.is_cancelled() {
+                                anyhow::bail!("cancelled");
+                            }
+                            continue; // retry same key
+                        }
+                        // Permanent error — fail fast, no retry across keys
+                        return Err(e);
                     }
-                    return Err(e);
                 }
             }
         }
@@ -507,7 +586,34 @@ impl AiProvider for GeminiProvider {
 
 fn is_quota_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
-    msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED")
+    msg.contains("429") || msg.contains("RESOURCE_EXHAUSTED") || msg.contains("QUOTA_EXCEEDED")
+}
+
+fn is_transient_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    // 503 UNAVAILABLE (high demand), 500 INTERNAL, 502/504 gateway — all retryable
+    msg.contains("503")
+        || msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("504")
+        || msg.contains("UNAVAILABLE")
+        || msg.contains("INTERNAL")
+        || msg.contains("DEADLINE_EXCEEDED")
+        || msg.contains("high demand")
+        || msg.contains("overloaded")
+        || msg.contains("temporarily")
+        || msg.contains("try again later")
+}
+
+fn short_error(e: &anyhow::Error) -> String {
+    let s = e.to_string();
+    // Truncate to first line / 180 chars to avoid dumping huge JSON in log
+    let first = s.lines().next().unwrap_or(&s);
+    if first.len() > 180 {
+        format!("{}...", &first[..180])
+    } else {
+        first.to_owned()
+    }
 }
 
 // -------------------------------------------------------------------------------------------------

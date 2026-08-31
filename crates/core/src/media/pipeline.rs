@@ -309,8 +309,8 @@ impl Pipeline {
         tracing::debug!("loaded {} existing moments for {}", moments.len(), video_id);
         // Ensure we don't have more moments than expected due to prior partial run — keep as is
         drop(conn);
-        // Build set of already analyzed chunk indices
-        let analyzed_set = get_analyzed_indices(&video_id);
+        // Build set of already analyzed chunk indices (mutable — updated after each persist)
+        let mut analyzed_set = get_analyzed_indices(&video_id);
         tracing::debug!("analyzed_set={:?} for {}", analyzed_set, video_id);
         for (i, vc) in chunks.iter().enumerate() {
             check_cancelled(&ctx.cancellation)?;
@@ -470,6 +470,7 @@ impl Pipeline {
                 session::upsert_video_job(&conn, &job)?;
             }
             drop(conn);
+            analyzed_set.insert(i as i64);
             moments.extend(chunk_moments);
 
             let frac = (i + 1) as f32 / total as f32;
