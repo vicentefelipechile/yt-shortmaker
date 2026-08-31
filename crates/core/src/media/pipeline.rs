@@ -5,6 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::build_registry;
@@ -78,14 +81,20 @@ impl Pipeline {
             .unwrap_or_else(|| format!("video_{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
         let video_path = ctx.work_dir.join(format!("{video_id}.mp4"));
 
-        // 1. Download (0.00 - 0.25)
+        // 1. Download (0.00 - 0.25) — streams yt-dlp output line-by-line as Log events
         check_cancelled(&ctx.cancellation)?;
         on_event(PipelineEvent::StageChanged(Stage::Downloading));
         on_event(PipelineEvent::Progress(
             0.05,
             "Downloading (low res for analysis)".into(),
         ));
-        ytdlp::download_video(
+        on_event(PipelineEvent::Log(format!(
+            "yt-dlp: {} -o {} -f worst[ext=mp4]/worst {}",
+            ctx.url,
+            video_path.display(),
+            if cookies.use_cookies { "(cookies)" } else { "" }
+        )));
+        download_with_logs(
             &ctx.url,
             &video_path,
             cookies.use_cookies,
@@ -93,6 +102,7 @@ impl Pipeline {
             true,
             processing.retry_attempts,
             &ctx.cancellation,
+            &mut on_event,
         )
         .await?;
         on_event(PipelineEvent::Progress(0.25, "Download complete".into()));
@@ -118,8 +128,22 @@ impl Pipeline {
             ranges.len(),
             processing.chunk_size_secs
         )));
-        let chunks =
-            chunk::split_video(&video_path, &ranges, &ctx.work_dir, &ctx.cancellation).await?;
+        // Emit per-chunk ffmpeg commands as logs before running
+        for (i, (start, dur)) in ranges.iter().enumerate() {
+            on_event(PipelineEvent::Log(format!(
+                "ffmpeg: -ss {start} -i {} -t {dur} -c copy {}",
+                video_path.display(),
+                ctx.work_dir.join(format!("chunk_{i}.mp4")).display()
+            )));
+        }
+        let chunks = split_with_logs(
+            &video_path,
+            &ranges,
+            &ctx.work_dir,
+            &ctx.cancellation,
+            &mut on_event,
+        )
+        .await?;
         on_event(PipelineEvent::Progress(0.40, "Split complete".into()));
 
         // 3. Analyze per chunk (0.40 - 0.90)
@@ -190,7 +214,7 @@ impl Pipeline {
             let plano = crate::plano::schema::create_default_plano();
             let info = crate::plano::preview::preview_info(&plano);
             on_event(PipelineEvent::Log(format!(
-                "auto_extract: {info} — extraction ships with export milestone (M5)"
+                "auto_extract: {info} - extraction ships with export milestone (M5)"
             )));
             // Demonstrate save_plano wiring (writes plano.json to work_dir for inspection)
             let tmp_plano = ctx.work_dir.join("plano.json");
@@ -216,6 +240,224 @@ impl Default for Pipeline {
 // -------------------------------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn download_with_logs<F>(
+    url: &str,
+    output: &Path,
+    use_cookies: bool,
+    cookies_path: Option<&str>,
+    low_res: bool,
+    retry_attempts: u32,
+    cancellation: &CancellationToken,
+    on_event: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(PipelineEvent) + Send + 'static,
+{
+    let mut last_err = None;
+    for attempt in 0..retry_attempts.max(1) {
+        if cancellation.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        match download_once_with_logs(
+            url,
+            output,
+            use_cookies,
+            cookies_path,
+            low_res,
+            cancellation,
+            on_event,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                on_event(PipelineEvent::Log(format!(
+                    "yt-dlp attempt {}/{} failed: {msg}",
+                    attempt + 1,
+                    retry_attempts.max(1)
+                )));
+                last_err = Some(e);
+                if attempt + 1 < retry_attempts.max(1) {
+                    let backoff = std::time::Duration::from_secs(1 << attempt);
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("download failed")))
+}
+
+async fn download_once_with_logs<F>(
+    url: &str,
+    output: &Path,
+    use_cookies: bool,
+    cookies_path: Option<&str>,
+    low_res: bool,
+    cancellation: &CancellationToken,
+    on_event: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(PipelineEvent) + Send + 'static,
+{
+    let mut cmd = Command::new(crate::setup::yt_dlp_bin());
+    cmd.arg("--no-playlist")
+        .arg("-o")
+        .arg(output.to_string_lossy().into_owned());
+    if low_res {
+        cmd.arg("-f").arg("worst[ext=mp4]/worst");
+    } else {
+        cmd.arg("-f")
+            .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best");
+        cmd.arg("--merge-output-format").arg("mp4");
+    }
+    if use_cookies {
+        if let Some(p) = cookies_path.filter(|p| !p.is_empty()) {
+            cmd.arg("--cookies").arg(p);
+        }
+    }
+    cmd.arg(url);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::setup::yt_dlp_missing_error()
+        } else {
+            anyhow::Error::from(e).context("failed to run yt-dlp")
+        }
+    })?;
+    let stderr = child.stderr.take();
+    if let Some(stderr) = stderr {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            if cancellation.is_cancelled() {
+                let _ = child.kill().await;
+                anyhow::bail!("cancelled");
+            }
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .context("reading yt-dlp stderr")?;
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim().to_string();
+            if !trimmed.is_empty() {
+                on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
+            }
+            // Small cooperative yield to allow cancellation
+            if line.len() > 4096 {
+                line.clear();
+            }
+        }
+    }
+    // Also drain stdout if any
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .context("reading yt-dlp stdout")?;
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim().to_string();
+            if !trimmed.is_empty() {
+                on_event(PipelineEvent::Log(format!("[yt-dlp] {trimmed}")));
+            }
+        }
+    }
+    let status = child.wait().await.context("waiting for yt-dlp")?;
+    if !status.success() {
+        anyhow::bail!("yt-dlp download failed (exit {status})");
+    }
+    Ok(())
+}
+
+async fn split_with_logs<F>(
+    input: &Path,
+    chunks: &[(u64, u64)],
+    output_dir: &Path,
+    cancellation: &CancellationToken,
+    on_event: &mut F,
+) -> anyhow::Result<Vec<crate::types::VideoChunk>>
+where
+    F: FnMut(PipelineEvent) + Send + 'static,
+{
+    std::fs::create_dir_all(output_dir).context("creating chunks dir")?;
+    let mut video_chunks = Vec::new();
+    for (i, (start, duration)) in chunks.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        let chunk_path = output_dir.join(format!("chunk_{i}.mp4"));
+        let mut cmd = Command::new(crate::setup::ffmpeg_bin());
+        cmd.args([
+            "-v",
+            "error",
+            "-y",
+            "-ss",
+            &start.to_string(),
+            "-i",
+            &input.to_string_lossy(),
+            "-t",
+            &duration.to_string(),
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            &chunk_path.to_string_lossy(),
+        ]);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::setup::ffmpeg_missing_error()
+            } else {
+                anyhow::Error::from(e).context("failed to run ffmpeg")
+            }
+        })?;
+        // Stream stderr
+        if let Some(stderr) = child.stderr.take() {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader
+                    .read_line(&mut line)
+                    .await
+                    .context("reading ffmpeg stderr")?;
+                if n == 0 {
+                    break;
+                }
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    on_event(PipelineEvent::Log(format!("[ffmpeg chunk {i}] {trimmed}")));
+                }
+                if cancellation.is_cancelled() {
+                    let _ = child.kill().await;
+                    anyhow::bail!("cancelled");
+                }
+            }
+        }
+        let status = child.wait().await.context("waiting for ffmpeg")?;
+        if !status.success() {
+            anyhow::bail!("ffmpeg split failed for chunk {i} (exit {status})");
+        }
+        video_chunks.push(crate::types::VideoChunk {
+            start_seconds: *start,
+            file_path: chunk_path.to_string_lossy().to_string(),
+        });
+    }
+    Ok(video_chunks)
+}
 
 fn check_cancelled(token: &CancellationToken) -> anyhow::Result<()> {
     if token.is_cancelled() {

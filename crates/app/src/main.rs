@@ -83,6 +83,14 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_video_id(t!("video_id").to_string().into());
     app.set_tr_video_no_thumb(t!("video_no_thumb").to_string().into());
     app.set_tr_video_found(t!("video_found").to_string().into());
+    app.set_tr_analysis_log_title(t!("analysis_logs_title").to_string().into());
+    app.set_tr_analysis_log_toggle(t!("analysis_logs_toggle").to_string().into());
+    app.set_tr_analysis_log_empty(t!("analysis_logs_empty").to_string().into());
+    app.set_tr_step_downloading(t!("analysis_step_downloading").to_string().into());
+    app.set_tr_step_splitting(t!("analysis_step_splitting").to_string().into());
+    app.set_tr_step_analyzing(t!("analysis_step_analyzing").to_string().into());
+    app.set_tr_step_extracting(t!("analysis_step_extracting").to_string().into());
+    app.set_tr_step_saving(t!("analysis_step_saving").to_string().into());
     app.set_tr_model_display_name(t!("model_display_name").to_string().into());
     app.set_tr_model_id_label(t!("model_id_label").to_string().into());
     app.set_tr_model_base(t!("model_base_provider").to_string().into());
@@ -266,10 +274,10 @@ fn refresh_models_list(app: &MainWindow, config: &yt_shortmaker_core::config::Ap
         .custom_models
         .iter()
         .map(|m| {
-            let marker = if m.id == active { "●" } else { " " };
+            let marker = if m.id == active { ">" } else { " " };
             let enabled = if m.enabled { "" } else { " [disabled]" };
             format!(
-                "{} {} — {} [{}] (base: {}){}",
+                "{} {} - {} [{}] (base: {}){}",
                 marker, m.id, m.display_name, m.model_id, m.base_provider, enabled
             )
         })
@@ -314,7 +322,7 @@ fn refresh_home(app: &MainWindow) {
                 projects
                     .iter()
                     .take(10)
-                    .map(|pr| format!("{} — {} [{}] {}", pr.title, pr.video_id, pr.status, pr.id))
+                    .map(|pr| format!("{} - {} [{}] {}", pr.title, pr.video_id, pr.status, pr.id))
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -412,7 +420,94 @@ fn main() -> anyhow::Result<()> {
                 match ytdlp::validate_media_url(&url) {
                     Ok(()) => {
                         app.set_url_error("".into());
-                        // Clear previous video and show dedicated fetching status below the button (not next to it)
+                        // Try SQLite cache first — instant display, no network.
+                        // Thumbnail bytes live under `img_cache/` next to `session.db`.
+                        let cached_hit: Option<session::CachedVideo> = session::db_path()
+                            .ok()
+                            .and_then(|p| session::init_db(&p).ok())
+                            .and_then(|conn| session::get_cached_video(&conn, &url).ok().flatten());
+                        if let Some(cached) = cached_hit {
+                            let duration_str = {
+                                let secs = cached.duration as u64;
+                                let h = secs / 3600;
+                                let m = (secs % 3600) / 60;
+                                let s = secs % 60;
+                                if h > 0 {
+                                    format!("{h:02}:{m:02}:{s:02}")
+                                } else {
+                                    format!("{m:02}:{s:02}")
+                                }
+                            };
+                            app.set_video_title(cached.title.clone().into());
+                            app.set_video_id(cached.video_id.clone().into());
+                            app.set_video_duration(duration_str.clone().into());
+                            app.set_video_thumbnail(
+                                cached.thumbnail_url.clone().unwrap_or_default().into(),
+                            );
+                            app.set_video_has_info(true);
+                            app.set_status_msg(
+                                t!(
+                                    "video_found",
+                                    title = cached.title.clone(),
+                                    duration = duration_str.clone()
+                                )
+                                .to_string()
+                                .into(),
+                            );
+                            // Prefer thumbnail persisted in img_cache (same folder as SQLite)
+                            let vid = cached.video_id.clone();
+                            let cached_thumb_url = cached.thumbnail_url.clone();
+                            // First try explicit thumbnail_path on disk, then conventional img_cache/<video_id>.jpg
+                            let disk_path = cached
+                                .thumbnail_path
+                                .as_deref()
+                                .map(std::path::PathBuf::from)
+                                .filter(|p| p.exists())
+                                .or_else(|| session::cached_thumbnail_on_disk(&vid));
+                            if let Some(p) = disk_path {
+                                if let Ok(img) = slint::Image::load_from_path(&p) {
+                                    app.set_video_thumbnail_image(img);
+                                }
+                            } else if let Some(thumb_url) = cached_thumb_url {
+                                // Cache miss on disk but we have URL — fetch into img_cache in background
+                                let weak3 = app.as_weak();
+                                let vid2 = vid.clone();
+                                std::thread::spawn(move || {
+                                    let rt2 = tokio::runtime::Runtime::new().unwrap();
+                                    let _ = rt2.block_on(async {
+                                        let resp = reqwest::get(&thumb_url).await?;
+                                        let bytes = resp.bytes().await?;
+                                        let path = session::save_thumbnail_to_cache(&vid2, &bytes)?;
+                                        let path_for_img = path.clone();
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(a) = weak3.upgrade() {
+                                                if let Ok(img) =
+                                                    slint::Image::load_from_path(&path_for_img)
+                                                {
+                                                    a.set_video_thumbnail_image(img);
+                                                }
+                                            }
+                                        });
+                                        // Update DB row with thumbnail_path
+                                        if let Ok(db) = session::db_path()
+                                            .and_then(|p| session::init_db(&p).map_err(|e| anyhow::anyhow!(e)))
+                                        {
+                                            if let Ok(Some(mut cv)) =
+                                                session::get_cached_video(&db, &url)
+                                            {
+                                                cv.thumbnail_path =
+                                                    Some(path.to_string_lossy().to_string());
+                                                let _ = session::upsert_cached_video(&db, &cv);
+                                            }
+                                        }
+                                        Ok::<(), anyhow::Error>(())
+                                    });
+                                });
+                            }
+                            return;
+                        }
+
+                        // Cache miss — clear UI and hit the network (yt-dlp)
                         app.set_video_has_info(false);
                         app.set_video_title("".into());
                         app.set_video_id("".into());
@@ -423,6 +518,7 @@ fn main() -> anyhow::Result<()> {
                         app.set_video_title("".into());
                         let cfg = config_rc.borrow().clone();
                         let app_weak2 = app_weak.clone();
+                        let url_for_cache = url.clone();
                         std::thread::spawn(move || {
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             let token = CancellationToken::new();
@@ -465,26 +561,88 @@ fn main() -> anyhow::Result<()> {
                                                 .to_string()
                                                 .into(),
                                             );
-                                            // Best-effort thumbnail download for dedicated panel
+                                            // Persist to SQLite + img_cache for future cache hits
+                                            let cached = session::CachedVideo {
+                                                url: url_for_cache.clone(),
+                                                video_id: info.video_id.clone(),
+                                                title: info.title.clone(),
+                                                duration: info.duration_secs,
+                                                thumbnail_url: info.thumbnail.clone(),
+                                                thumbnail_path: None,
+                                                fetched_at: chrono::Local::now().to_rfc3339(),
+                                            };
+                                            if let Ok(db) = session::db_path()
+                                                .and_then(|p| {
+                                                    session::init_db(&p).map_err(|e| anyhow::anyhow!(e))
+                                                })
+                                            {
+                                                let _ = session::upsert_cached_video(&db, &cached);
+                                            }
+                                            // Thumbnail → img_cache/<video_id>.jpg (same folder as session.db)
                                             if let Some(thumb_url) = info.thumbnail.clone() {
                                                 let weak3 = app_weak2.clone();
+                                                let vid = info.video_id.clone();
+                                                let url_c = url_for_cache.clone();
+                                                let thumb_url_c = thumb_url.clone();
                                                 std::thread::spawn(move || {
                                                     let rt2 = tokio::runtime::Runtime::new().unwrap();
                                                     let img_res = rt2.block_on(async {
                                                         let resp = reqwest::get(&thumb_url).await?;
                                                         let bytes = resp.bytes().await?;
-                                                        let tmp = std::env::temp_dir()
-                                                            .join("yt-shortmaker-thumb.jpg");
-                                                        tokio::fs::write(&tmp, &bytes).await?;
-                                                        anyhow::Ok(tmp)
+                                                        let path =
+                                                            session::save_thumbnail_to_cache(
+                                                                &vid, &bytes,
+                                                            )?;
+                                                        // Update DB row with local path
+                                                        if let Ok(db) = session::db_path().and_then(
+                                                            |p| {
+                                                                session::init_db(&p)
+                                                                    .map_err(|e| anyhow::anyhow!(e))
+                                                            },
+                                                        ) {
+                                                            if let Ok(Some(mut cv)) =
+                                                                session::get_cached_video(&db, &url_c)
+                                                            {
+                                                                cv.thumbnail_path = Some(
+                                                                    path.to_string_lossy().to_string(),
+                                                                );
+                                                                cv.thumbnail_url =
+                                                                    Some(thumb_url_c.clone());
+                                                                let _ = session::upsert_cached_video(
+                                                                    &db, &cv,
+                                                                );
+                                                            } else {
+                                                                // No row yet (race) — insert minimal
+                                                                let cv2 = session::CachedVideo {
+                                                                    url: url_c.clone(),
+                                                                    video_id: vid.clone(),
+                                                                    title: String::new(),
+                                                                    duration: 0.0,
+                                                                    thumbnail_url: Some(
+                                                                        thumb_url_c.clone(),
+                                                                    ),
+                                                                    thumbnail_path: Some(
+                                                                        path.to_string_lossy()
+                                                                            .to_string(),
+                                                                    ),
+                                                                    fetched_at: chrono::Local::now()
+                                                                        .to_rfc3339(),
+                                                                };
+                                                                let _ =
+                                                                    session::upsert_cached_video(
+                                                                        &db, &cv2,
+                                                                    );
+                                                            }
+                                                        }
+                                                        Ok::<std::path::PathBuf, anyhow::Error>(path)
                                                     });
-                                                    if let Ok(tmp_path) = img_res {
+                                                    if let Ok(path) = img_res {
                                                         let _ = slint::invoke_from_event_loop(
                                                             move || {
                                                                 if let Some(a) = weak3.upgrade() {
                                                                     if let Ok(img) =
                                                                         slint::Image::load_from_path(
-                                                                            &tmp_path,
+                                                                            &path,
                                                                         ) {
                                                                         a.set_video_thumbnail_image(
                                                                             img,
@@ -543,7 +701,42 @@ fn main() -> anyhow::Result<()> {
                 let app_weak2 = app_weak.clone();
 
                 app.set_progress(0.0);
-                app.set_status_msg(t!("new_project_analyzing").to_string().into());
+                app.set_is_analyzing(true);
+                app.set_analysis_current_step(1);
+                app.set_analysis_total_steps(4);
+                app.set_analysis_step_label(t!("analysis_step_downloading").to_string().into());
+                app.set_analysis_log("".into());
+                app.set_analysis_log_expanded(false);
+                app.set_analysis_anim(0.0);
+                app.set_status_msg(format!("1/4 - {}", t!("analysis_step_downloading")).into());
+
+                // Shimmer ticker — drives the animated progress bar while is-analyzing
+                let ticker_weak = app_weak2.clone();
+                let anim_pos = std::sync::Arc::new(std::sync::Mutex::new(0.0f32));
+                let anim_pos2 = anim_pos.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(35));
+                    if ticker_weak
+                        .upgrade()
+                        .map(|a| !a.get_is_analyzing())
+                        .unwrap_or(true)
+                    {
+                        break;
+                    }
+                    let next = {
+                        let mut g = anim_pos2.lock().unwrap();
+                        *g = (*g + 0.045) % 1.0;
+                        *g
+                    };
+                    let w = ticker_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(a) = w.upgrade() {
+                            if a.get_is_analyzing() {
+                                a.set_analysis_anim(next);
+                            }
+                        }
+                    });
+                });
 
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -579,27 +772,67 @@ fn main() -> anyhow::Result<()> {
                                                     app.set_status_msg(msg.into());
                                                 }
                                                 PipelineEvent::Log(msg) => {
-                                                    app.set_status_msg(msg.into());
+                                                    // Accumulate into collapsible technical log (yt-dlp / ffmpeg)
+                                                    let prev: String =
+                                                        app.get_analysis_log().into();
+                                                    let mut next = if prev.is_empty() {
+                                                        msg.clone()
+                                                    } else {
+                                                        format!("{prev}\n{msg}")
+                                                    };
+                                                    // Keep log bounded (~8000 chars) to avoid UI blowup
+                                                    if next.len() > 8000 {
+                                                        let start = next.len() - 8000;
+                                                        // find next newline to avoid cutting mid-line
+                                                        let cut = next[start..]
+                                                            .find('\n')
+                                                            .map(|i| start + i + 1)
+                                                            .unwrap_or(start);
+                                                        next = next[cut..].to_string();
+                                                    }
+                                                    app.set_analysis_log(next.into());
                                                 }
                                                 PipelineEvent::StageChanged(stage) => {
-                                                    let label = match stage {
-                                                        Stage::Downloading => {
-                                                            t!("status_analyzing").to_string()
-                                                        }
-                                                        Stage::Splitting => {
-                                                            t!("status_analyzing").to_string()
-                                                        }
+                                                    let (step, label) = match stage {
+                                                        Stage::Downloading => (
+                                                            1,
+                                                            t!("analysis_step_downloading")
+                                                                .to_string(),
+                                                        ),
+                                                        Stage::Splitting => (
+                                                            2,
+                                                            t!("analysis_step_splitting")
+                                                                .to_string(),
+                                                        ),
                                                         Stage::Analyzing { current, total } => {
-                                                            format!(
-                                                                "{} {current}/{total}",
-                                                                t!("status_analyzing")
-                                                            )
+                                                            let base =
+                                                                t!("analysis_step_analyzing")
+                                                                    .to_string();
+                                                            (3, format!("{base} {current}/{total}"))
                                                         }
-                                                        Stage::Extracting => {
-                                                            t!("status_analyzing").to_string()
-                                                        }
+                                                        Stage::Extracting => (
+                                                            4,
+                                                            t!("analysis_step_extracting")
+                                                                .to_string(),
+                                                        ),
                                                     };
-                                                    app.set_status_msg(label.into());
+                                                    app.set_analysis_current_step(step);
+                                                    app.set_analysis_step_label(
+                                                        label.clone().into(),
+                                                    );
+                                                    app.set_status_msg(
+                                                        format!("{step}/4 - {label}").into(),
+                                                    );
+                                                    // Also push stage label into technical log
+                                                    let prev: String =
+                                                        app.get_analysis_log().into();
+                                                    let line = format!("-- {} --", label);
+                                                    let next = if prev.is_empty() {
+                                                        line
+                                                    } else {
+                                                        format!("{prev}\n{line}")
+                                                    };
+                                                    app.set_analysis_log(next.into());
                                                 }
                                             }
                                         }
@@ -609,9 +842,14 @@ fn main() -> anyhow::Result<()> {
                             .await;
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(app) = done_weak.upgrade() {
+                                app.set_is_analyzing(false);
                                 match result {
                                     Ok(out) => {
                                         app.set_progress(1.0);
+                                        app.set_analysis_current_step(4);
+                                        app.set_analysis_step_label(
+                                            t!("analysis_step_saving").to_string().into(),
+                                        );
                                         app.set_status_msg(
                                             format!(
                                                 "{}: {} moments, {} chunks",
@@ -918,6 +1156,15 @@ fn main() -> anyhow::Result<()> {
         move || {
             if let Some(app) = app_weak.upgrade() {
                 app.set_show_model_drawer(false);
+            }
+        }
+    });
+    app.on_toggle_analysis_log({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let cur = app.get_analysis_log_expanded();
+                app.set_analysis_log_expanded(!cur);
             }
         }
     });

@@ -102,3 +102,7 @@ See §5. Violate it and buttons die / drawer closes by itself / list is not inte
 - [ ] `cargo fmt --check` / `clippy -- -D warnings` / `test --workspace` green
 - [ ] `keys-status/models-status/settings-status/toast-msg` not shared
 - [ ] Minimal diff, no unsolicited redesign
+- [ ] No emojis, no decorative unicode, no special characters in UI — plain ASCII/text only
+
+### 6.5 No emojis / no caracteres especiales — PROHIBIDO
+**PROHIBIDO terminantemente** en `crates/app/ui/app.slint`, `crates/app/src/main.rs` (texto visible), y `locales/*.yml`: emojis (❌ ✅ ⚠️ 📂 📋 🎬 etc.), símbolos decorativos (● ◐ ▸ ▾ ── — • etc.), y cualquier unicode no-ASCII innecesario que arruine la interfaz flat dark square. Usar solo texto plano ASCII o letras acentuadas normales del idioma. Esta regla rompe la UX si se viola. Si encuentras un emoji o caracter especial en la app, eliminalo inmediatamente y reemplazalo por texto descriptivo simple (ej. "No template selected" en lugar de "❌ No template selected", ">" en lugar de "●", "-- label --" en lugar de "── label ──", "v"/">" en lugar de "▾/▸", "Working" en lugar de "◐"). On failure, the UI loses its intended minimal flat identity (`STYLE.md:8,25`).

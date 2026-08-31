@@ -22,7 +22,7 @@ The application has one intentional visual language: flat, dark, compact, and sq
 - Do not introduce the typical AI-slop purple/blue gradient palette.
 - Existing accent colors are allowed only when they match the established palette and purpose.
 - Do not replace the current layout with large hero sections, oversized typography, metric cards, or excessive whitespace.
-- Do not add emojis or decorative icons to make a screen appear more complete.
+- Do not add emojis or decorative icons to make a screen appear more complete. **PROHIBIDO:** cualquier emoji (❌ ✅ ⚠️ 📂 📋 🎬 etc.) o caracter especial decorativo (● ◐ ▸ ▾ ── — • etc.) en la interfaz. Solo texto plano ASCII o acentos normales del idioma.
 - Keep text sufficiently bright for readability on the dark background.
 
 ### Established Palette
@@ -174,3 +174,4 @@ Before submitting a UI change, verify:
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace` passes.
 - [ ] The final diff is limited to the requested change.
+- [ ] No emojis, no decorative unicode, no special characters in UI — plain ASCII/text only.

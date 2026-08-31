@@ -304,6 +304,14 @@ export component MainWindow inherits Window {
     in property <string> tr-test-connection: "Test connection";
     in property <string> tr-deps-installing: "Installing tools...";
     in property <string> tr-deps-install: "Install automatically";
+    in property <string> tr-analysis-log-title: "Technical log (yt-dlp / ffmpeg)";
+    in property <string> tr-analysis-log-toggle: "Show details";
+    in property <string> tr-analysis-log-empty: "No output yet — details will appear here while yt-dlp and ffmpeg run.";
+    in property <string> tr-step-downloading: "Downloading (low res for analysis)";
+    in property <string> tr-step-splitting: "Splitting video";
+    in property <string> tr-step-analyzing: "Analyzing";
+    in property <string> tr-step-extracting: "Extracting shorts";
+    in property <string> tr-step-saving: "Saving";
     in property <string> deps-error: "";
     in property <bool> deps-ok: true;
     in property <bool> deps-installing: false;
@@ -312,6 +320,14 @@ export component MainWindow inherits Window {
     in property <string> keys-status: "";
     in property <string> models-status: "";
     in property <string> toast-msg: "";
+    // Analysis progress state — per-panel, not shared
+    in property <bool> is-analyzing: false;
+    in property <int> analysis-current-step: 0;
+    in property <int> analysis-total-steps: 4;
+    in property <string> analysis-step-label: "";
+    in property <string> analysis-log: "";
+    in property <bool> analysis-log-expanded: false;
+    in property <float> analysis-anim: 0.0;
 
     callback navigate(string);
     callback fetch-info();
@@ -337,6 +353,7 @@ export component MainWindow inherits Window {
     callback close-model-drawer();
     callback select-model-id(string);
     callback delete-model-id(string);
+    callback toggle-analysis-log();
 
     HorizontalLayout {
         Rectangle {
@@ -516,8 +533,48 @@ export component MainWindow inherits Window {
                             spacing: 8px;
                             alignment: start;
                             SquareButton { label: root.tr-analyze; primary: true; width: 140px; clicked => { root.start-analyze(); } }
+                            if root.is-analyzing: Text { text: "> " + root.analysis-step-label; color: #818cf8; font-size: 11px; vertical-alignment: center; }
                         }
-                        if status-msg != "": Rectangle {
+                        // Step indicator + status
+                        if root.is-analyzing || root.analysis-current-step > 0: Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.analysis-current-step + "/" + root.analysis-total-steps + " - " + root.analysis-step-label;
+                                        color: #e4e4e7;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    if root.is-analyzing: Text { text: "Working"; color: #6366f1; font-size: 11px; }
+                                }
+                                // Dots for steps
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    for i in 4: Rectangle {
+                                        width: 22px;
+                                        height: 4px;
+                                        background: i < root.analysis-current-step ? #6366f1 : #27272a;
+                                        border-width: 1px;
+                                        border-color: i < root.analysis-current-step ? #6366f1 : #3a3c42;
+                                        if i + 1 == root.analysis-current-step && root.is-analyzing: Rectangle {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            background: #818cf8;
+                                            opacity: 0.7;
+                                        }
+                                    }
+                                }
+                                if status-msg != "": Text { text: status-msg; color: #c3c6cc; font-size: 11px; wrap: word-wrap; }
+                            }
+                        }
+                        if !root.is-analyzing && root.analysis-current-step == 0 && status-msg != "": Rectangle {
                             background: #1a1a1e;
                             border-width: 1px;
                             border-color: #27272a;
@@ -527,10 +584,91 @@ export component MainWindow inherits Window {
                                 Text { text: status-msg; color: #c3c6cc; font-size: 12px; wrap: word-wrap; }
                             }
                         }
+                        // Animated progress bar — determinate fill + shimmer when working
                         Rectangle {
-                            height: 4px;
+                            height: 6px;
                             background: #27272a;
-                            Rectangle { width: parent.width * progress; height: 4px; background: #6366f1; }
+                            border-width: 1px;
+                            border-color: #3a3c42;
+                            clip: true;
+                            Rectangle {
+                                x: 0px;
+                                width: parent.width * progress;
+                                height: parent.height;
+                                background: #6366f1;
+                            }
+                            if root.is-analyzing && progress < 1.0: Rectangle {
+                                width: 90px;
+                                height: parent.height;
+                                background: #818cf8;
+                                opacity: 0.95;
+                                x: (parent.width - 90px) * root.analysis-anim;
+                            }
+                        }
+                        // Collapsible technical log (yt-dlp / ffmpeg)
+                        Rectangle {
+                            background: #1a1a1e;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                spacing: 0px;
+                                Rectangle {
+                                    height: 32px;
+                                    background: #202124;
+                                    border-width: 1px;
+                                    border-color: #3a3c42;
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 8px;
+                                        spacing: 8px;
+                                        Text {
+                                            text: root.tr-analysis-log-title;
+                                            color: #e4e4e7;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: root.analysis-log-expanded ? "v" : ">";
+                                            color: #a1a1aa;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: root.tr-analysis-log-toggle;
+                                            color: #a1a1aa;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    TouchArea { clicked => { root.toggle-analysis-log(); } }
+                                }
+                                if root.analysis-log-expanded: Rectangle {
+                                    height: 150px;
+                                    background: #121214;
+                                    border-width: 1px;
+                                    border-color: #27272a;
+                                    ScrollView {
+                                        VerticalLayout {
+                                            padding: 8px;
+                                            spacing: 2px;
+                                            if root.analysis-log == "": Text {
+                                                text: root.tr-analysis-log-empty;
+                                                color: #71717a;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                            if root.analysis-log != "": Text {
+                                                text: root.analysis-log;
+                                                color: #d4d4d8;
+                                                font-size: 10px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -631,7 +769,7 @@ export component MainWindow inherits Window {
                                             padding-left: 8px;
                                             padding-right: 6px;
                                             spacing: 8px;
-                                            Text { text: m.active ? "●" : " "; color: #6366f1; font-size: 10px; width: 12px; vertical-alignment: center; }
+                                            Text { text: m.active ? ">" : " "; color: #6366f1; font-size: 10px; width: 12px; vertical-alignment: center; }
                                             VerticalLayout {
                                                 spacing: 1px;
                                                 vertical-stretch: 1;

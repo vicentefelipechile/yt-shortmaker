@@ -2,7 +2,7 @@
 // session — SQLite session persistence
 // =================================================================================================
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS exports (
   output_dir TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+-- Cache for fetch_info (ytdlp) so repeated URLs do not hit the network
+CREATE TABLE IF NOT EXISTS video_cache (
+  url TEXT PRIMARY KEY,
+  video_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  duration REAL NOT NULL,
+  thumbnail_url TEXT,
+  thumbnail_path TEXT,
+  fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_video_cache_video_id ON video_cache(video_id);
 "#;
 
 // -------------------------------------------------------------------------------------------------
@@ -65,6 +76,20 @@ pub struct Project {
     pub status: String,
 }
 
+/// Cached VideoInfo persisted in SQLite (same folder as session.db).
+/// Thumbnail bytes are stored on disk under `img_cache/` next to the DB.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedVideo {
+    pub url: String,
+    pub video_id: String,
+    pub title: String,
+    pub duration: f64,
+    pub thumbnail_url: Option<String>,
+    /// Absolute path on disk under `img_cache/` (if thumbnail was cached).
+    pub thumbnail_path: Option<String>,
+    pub fetched_at: String,
+}
+
 // -------------------------------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------------------------------
@@ -75,12 +100,53 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(path).context("opening sqlite")?;
     conn.execute_batch(SCHEMA).context("creating schema")?;
+    // Ensure img_cache exists alongside the DB (same parent dir)
+    if let Some(parent) = path.parent() {
+        let cache = parent.join("img_cache");
+        let _ = std::fs::create_dir_all(&cache);
+    }
     Ok(conn)
 }
 
 pub fn db_path() -> Result<std::path::PathBuf> {
     let dir = dirs::data_local_dir().context("resolving data_local_dir")?;
     Ok(dir.join("yt-shortmaker-v2").join("session.db"))
+}
+
+/// Directory that holds `session.db` (e.g. `%LOCALAPPDATA%/yt-shortmaker-v2` on Windows).
+pub fn db_dir() -> Result<PathBuf> {
+    Ok(db_path()?
+        .parent()
+        .context("db_path has no parent")?
+        .to_path_buf())
+}
+
+/// `img_cache/` lives in the **same directory** as `session.db` — all thumbnails and image
+/// content are persisted here so the whole session is cacheable.
+pub fn img_cache_dir() -> Result<PathBuf> {
+    Ok(db_dir()?.join("img_cache"))
+}
+
+pub fn ensure_img_cache_dir() -> Result<PathBuf> {
+    let dir = img_cache_dir()?;
+    std::fs::create_dir_all(&dir).context("creating img_cache dir")?;
+    Ok(dir)
+}
+
+/// Deterministic thumbnail path for a given video_id (always under `img_cache/`).
+/// Extension is normalised to `.jpg` — yt-dlp thumbnails are almost always jpeg.
+pub fn thumbnail_cache_path(video_id: &str) -> Result<PathBuf> {
+    let safe: String = video_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(img_cache_dir()?.join(format!("{safe}.jpg")))
 }
 
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
@@ -226,6 +292,103 @@ pub fn delete_project(conn: &Connection, id: &str) -> Result<()> {
 }
 
 // -------------------------------------------------------------------------------------------------
+// Video cache (fetch_info) — SQLite + img_cache/
+// -------------------------------------------------------------------------------------------------
+
+pub fn upsert_cached_video(conn: &Connection, cached: &CachedVideo) -> Result<()> {
+    conn.execute(
+        "INSERT INTO video_cache (url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(url) DO UPDATE SET
+           video_id=excluded.video_id, title=excluded.title, duration=excluded.duration,
+           thumbnail_url=excluded.thumbnail_url, thumbnail_path=excluded.thumbnail_path,
+           fetched_at=excluded.fetched_at",
+        params![
+            cached.url,
+            cached.video_id,
+            cached.title,
+            cached.duration,
+            cached.thumbnail_url,
+            cached.thumbnail_path,
+            cached.fetched_at
+        ],
+    )
+    .context("upserting cached video")?;
+    Ok(())
+}
+
+pub fn get_cached_video(conn: &Connection, url: &str) -> Result<Option<CachedVideo>> {
+    conn.query_row(
+        "SELECT url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at
+         FROM video_cache WHERE url = ?1",
+        params![url],
+        |row| {
+            Ok(CachedVideo {
+                url: row.get(0)?,
+                video_id: row.get(1)?,
+                title: row.get(2)?,
+                duration: row.get(3)?,
+                thumbnail_url: row.get(4)?,
+                thumbnail_path: row.get(5)?,
+                fetched_at: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .context("querying cached video")
+}
+
+pub fn get_cached_video_by_id(conn: &Connection, video_id: &str) -> Result<Option<CachedVideo>> {
+    conn.query_row(
+        "SELECT url, video_id, title, duration, thumbnail_url, thumbnail_path, fetched_at
+         FROM video_cache WHERE video_id = ?1 ORDER BY fetched_at DESC LIMIT 1",
+        params![video_id],
+        |row| {
+            Ok(CachedVideo {
+                url: row.get(0)?,
+                video_id: row.get(1)?,
+                title: row.get(2)?,
+                duration: row.get(3)?,
+                thumbnail_url: row.get(4)?,
+                thumbnail_path: row.get(5)?,
+                fetched_at: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+    .context("querying cached video by id")
+}
+
+/// Stores thumbnail bytes to `img_cache/<video_id>.jpg` and returns the absolute path.
+/// Caller decides when to update the DB row; this only touches the filesystem.
+pub fn save_thumbnail_to_cache(video_id: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let dir = ensure_img_cache_dir()?;
+    let path = dir.join(format!(
+        "{}.jpg",
+        video_id
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    ));
+    std::fs::write(&path, bytes).context("writing thumbnail to img_cache")?;
+    Ok(path)
+}
+
+/// Returns cached thumbnail path if the file actually exists on disk.
+pub fn cached_thumbnail_on_disk(video_id: &str) -> Option<PathBuf> {
+    let path = thumbnail_cache_path(video_id).ok()?;
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------------------------------
 
@@ -316,5 +479,53 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].start_time, "00:00:09");
         assert_eq!(loaded[1].start_time, "00:01:00");
+    }
+
+    #[test]
+    fn test_video_cache_and_img_cache() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("nested").join("session.db");
+        let conn = init_db(&db).unwrap();
+        // init_db must have created img_cache alongside the DB
+        assert!(db.parent().unwrap().join("img_cache").exists());
+
+        let cv = CachedVideo {
+            url: "https://youtube.com/watch?v=abc123DEF45".into(),
+            video_id: "abc123DEF45".into(),
+            title: "Cached Title".into(),
+            duration: 123.0,
+            thumbnail_url: Some("https://example.com/thumb.jpg".into()),
+            thumbnail_path: None,
+            fetched_at: chrono::Local::now().to_rfc3339(),
+        };
+        upsert_cached_video(&conn, &cv).unwrap();
+        let loaded = get_cached_video(&conn, &cv.url).unwrap().unwrap();
+        assert_eq!(loaded.title, "Cached Title");
+        assert_eq!(loaded.video_id, "abc123DEF45");
+
+        // Upsert should replace
+        let mut cv2 = cv.clone();
+        cv2.title = "Updated".into();
+        upsert_cached_video(&conn, &cv2).unwrap();
+        let loaded2 = get_cached_video(&conn, &cv.url).unwrap().unwrap();
+        assert_eq!(loaded2.title, "Updated");
+
+        // Lookup by video_id
+        let by_id = get_cached_video_by_id(&conn, "abc123DEF45")
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_id.url, cv.url);
+    }
+
+    #[test]
+    fn test_thumbnail_cache_path_is_under_db_dir() {
+        // thumbnail_cache_path uses db_dir()/img_cache which resolves via dirs::data_local_dir,
+        // so we only verify the components and that the function does not panic.
+        let p = thumbnail_cache_path("dQw4w9WgXcQ").unwrap();
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "dQw4w9WgXcQ.jpg");
+        assert_eq!(
+            p.parent().unwrap().file_name().unwrap().to_string_lossy(),
+            "img_cache"
+        );
     }
 }
