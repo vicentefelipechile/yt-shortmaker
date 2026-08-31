@@ -38,6 +38,7 @@ const FILE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_MIME: &str = "video/mp4";
 const MAX_OUTPUT_TOKENS: u64 = 4096;
 const MAX_TIMESTAMP_SECONDS: u64 = 3600;
+const GENERATE_TIMEOUT: Duration = Duration::from_secs(240);
 
 const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
 1. Duration: 10 to 90 seconds per moment.
@@ -265,15 +266,27 @@ impl GeminiProvider {
         file_uri: &str,
         key: &str,
     ) -> Result<Vec<VideoMoment>> {
+        let gen_start = std::time::Instant::now();
         send_log(ctx, "Calling generateContent");
+        tracing::info!(
+            "generateContent start model={} fileUri={} chunk={}",
+            self.model,
+            file_uri,
+            ctx.chunk_path.display()
+        );
         let user_prompt =
             "Analyze this video chunk and identify the best moments for YouTube Shorts."
                 .to_string();
 
+        // Gemini 3.x uses thinkingLevel (minimal ≈ off), Gemini 2.5 uses thinkingBudget=0
+        // Docs: https://ai.google.dev/gemini-api/docs/thinking — 3.1-flash-lite does not support full off,
+        // minimal is the lowest supported level; 2.5 models use thinkingBudget 0 to disable.
+        let is_gemini3 = self.model.starts_with("gemini-3");
         let mut generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema(),
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            "thinkingConfig": if is_gemini3 { json!({ "thinkingLevel": "MINIMAL" }) } else { json!({ "thinkingBudget": 0 }) },
         });
         if let Some(t) = self.temperature {
             generation_config["temperature"] = json!(t);
@@ -294,15 +307,22 @@ impl GeminiProvider {
             "generationConfig": generation_config,
         });
 
-        let resp = reqwest::Client::new()
-            .post(format!(
-                "{API_BASE}/models/{}:generateContent?key={key}",
-                self.model
-            ))
-            .json(&payload)
-            .send()
-            .await
-            .context("calling generateContent")?;
+        tracing::info!(
+            "Calling generateContent model={} fileUri={} timeout={:?}",
+            self.model,
+            file_uri,
+            GENERATE_TIMEOUT
+        );
+        let client = reqwest::Client::builder()
+            .timeout(GENERATE_TIMEOUT)
+            .build()
+            .context("building generateContent client")?;
+        let url = format!("{API_BASE}/models/{}:generateContent?key={key}", self.model);
+        let resp = tokio::select! {
+            r = client.post(&url).json(&payload).send() => r.context("calling generateContent")?,
+            _ = ctx.cancellation.cancelled() => anyhow::bail!("cancelled during generateContent"),
+            _ = tokio::time::sleep(GENERATE_TIMEOUT + Duration::from_secs(10)) => anyhow::bail!("generateContent timed out after {:?}", GENERATE_TIMEOUT),
+        };
 
         let status = resp.status();
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -347,6 +367,12 @@ impl GeminiProvider {
         if !moments.is_empty() && out.is_empty() {
             anyhow::bail!("structured response contained no valid timestamp ranges");
         }
+        tracing::info!(
+            "generateContent done model={} elapsed={:?} moments={}",
+            self.model,
+            gen_start.elapsed(),
+            out.len()
+        );
         Ok(out)
     }
 
@@ -615,7 +641,7 @@ fn is_quota_error(e: &anyhow::Error) -> bool {
 fn is_transient_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     // 503 UNAVAILABLE (high demand), 500 INTERNAL, 502/504 gateway — all retryable
-    // also JSON truncation due to MAX_TOKENS (EOF while parsing)
+    // also JSON truncation due to MAX_TOKENS (EOF while parsing) and hanging generateContent
     msg.contains("503")
         || msg.contains("500")
         || msg.contains("502")
@@ -631,6 +657,9 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
         || msg.contains("EOF while parsing")
         || msg.contains("parsing structured moments json")
         || msg.contains("no valid timestamp ranges")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("Generate timeout")
 }
 
 fn short_error(e: &anyhow::Error) -> String {
