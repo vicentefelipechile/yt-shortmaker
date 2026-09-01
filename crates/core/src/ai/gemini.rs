@@ -14,6 +14,7 @@ use super::provider::{AiProvider, AnalyzeCtx, ProviderCapabilities, ProviderEven
 use crate::config::ProviderConfig;
 use crate::types::{
     format_seconds_to_timestamp, parse_timestamp_to_seconds, DialoguePhrase, VideoMoment,
+    MIN_MOMENT_DURATION_SECONDS,
 };
 
 fn send_log(ctx: &AnalyzeCtx, msg: impl Into<String>) {
@@ -43,9 +44,10 @@ const MAX_TIMESTAMP_SECONDS: u64 = 3600;
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(240);
 
 const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video and identify the best moments suitable for YouTube Shorts.
-1. Duration: 10 to 90 seconds per moment.
+1. Duration: 20 to 90 seconds per moment. Never return a moment shorter than 20 seconds.
 2. Each moment must be self-contained (start and end).
 3. Prioritize: hooks, funny/emotional moments, strong statements, plot twists, valuable info.
+4. If the streamer asks viewers to clip something, in any language (for example "clip that", "someone clip that", "clipeen eso", "por favor alguien hagale clip a eso", "faites un clip de ca", or equivalent), treat it as contextual evidence that a notable event just happened or is unfolding. Infer what made the streamer say it and select the complete preceding event, including enough setup and payoff. Do not start the moment at the request, do not cut mechanically around that phrase, and do not treat the request itself as the reason to create a clip. Use logical editorial judgment; only return it when the surrounding event is genuinely interesting or funny.
 Timestamps are within the provided video where 00:00:00 is the first frame. Return ONLY HH:MM:SS (exactly 8 chars, e.g. 00:01:23), zero-padded, 00:00:00 to 01:00:00. NEVER add milliseconds, decimals or extra zeros (e.g. 00:01:23.000 is FORBIDDEN)."#;
 
 // -------------------------------------------------------------------------------------------------
@@ -411,8 +413,9 @@ impl GeminiProvider {
             };
             if !valid_second_range(start_secs, end_secs) {
                 rejected.push(format!(
-                    "invalid range start={start_secs} end={end_secs} (must 0..{} and end>start) in {m}",
-                    MAX_TIMESTAMP_SECONDS
+                    "invalid range start={start_secs} end={end_secs} (must be 0..{} and at least {}s long) in {m}",
+                    MAX_TIMESTAMP_SECONDS,
+                    MIN_MOMENT_DURATION_SECONDS
                 ));
                 continue;
             }
@@ -521,7 +524,7 @@ fn parse_dialogue(value: Option<&serde_json::Value>, offset: u64) -> Vec<Dialogu
             let end_str = d["end_time"].as_str()?;
             let start = parse_timestamp_to_seconds(start_str)?;
             let end = parse_timestamp_to_seconds(end_str)?;
-            if !valid_second_range(start, end) {
+            if !valid_dialogue_range(start, end) {
                 return None;
             }
             let phrase = d["phrase"].as_str().or_else(|| d["text"].as_str())?;
@@ -535,6 +538,12 @@ fn parse_dialogue(value: Option<&serde_json::Value>, offset: u64) -> Vec<Dialogu
 }
 
 fn valid_second_range(start: u64, end: u64) -> bool {
+    start <= MAX_TIMESTAMP_SECONDS
+        && end <= MAX_TIMESTAMP_SECONDS
+        && end.saturating_sub(start) >= MIN_MOMENT_DURATION_SECONDS
+}
+
+fn valid_dialogue_range(start: u64, end: u64) -> bool {
     start <= MAX_TIMESTAMP_SECONDS && end <= MAX_TIMESTAMP_SECONDS && end > start
 }
 
@@ -555,7 +564,7 @@ fn response_schema() -> serde_json::Value {
                         },
                         "end_time": {
                             "type": "STRING",
-                            "description": "End timestamp within the provided video as HH:MM:SS (e.g. 00:01:45), 10-90s after start_time. Exactly HH:MM:SS, no milliseconds."
+                            "description": "End timestamp within the provided video as HH:MM:SS (e.g. 00:01:45), 20-90s after start_time. Exactly HH:MM:SS, no milliseconds."
                         },
                         "category": {
                             "type": "STRING",
@@ -774,7 +783,8 @@ mod tests {
 
     #[test]
     fn test_second_range() {
-        assert!(valid_second_range(1, 2));
+        assert!(!valid_second_range(1, 20));
+        assert!(valid_second_range(1, 21));
         assert!(!valid_second_range(2, 2));
         assert!(!valid_second_range(0, MAX_TIMESTAMP_SECONDS + 1));
     }
