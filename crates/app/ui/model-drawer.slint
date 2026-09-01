@@ -58,6 +58,7 @@ export component ModelDrawer inherits Rectangle {
                 spacing: 4px;
                 height: 34px;
                 SquareChoice { label: "gemini"; selected: root.base-provider == "gemini"; chosen => { root.base-provider = "gemini"; } }
+                SquareChoice { label: "openrouter"; selected: root.base-provider == "openrouter"; chosen => { root.base-provider = "openrouter"; } }
             }
         }
         VerticalLayout {

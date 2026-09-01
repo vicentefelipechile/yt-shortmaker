@@ -13,7 +13,9 @@ use serde_json::json;
 
 use super::provider::{AiProvider, AnalyzeCtx, ProviderCapabilities, ProviderEvent};
 use crate::config::ProviderConfig;
-use crate::types::{format_seconds_to_timestamp, DialoguePhrase, VideoMoment};
+use crate::types::{
+    format_seconds_to_timestamp, parse_timestamp_to_seconds, DialoguePhrase, VideoMoment,
+};
 
 const MAX_OUTPUT_TOKENS: u64 = 4096;
 const MAX_TIMESTAMP_SECONDS: u64 = 3600;
@@ -38,11 +40,11 @@ const OPENROUTER_DISPLAY: &str = "OpenRouter";
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const CHUNK_MIME: &str = "video/mp4";
 
-const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
+const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video and identify the best moments suitable for YouTube Shorts.
 1. Duration: 10 to 90 seconds per moment.
 2. Each moment must be self-contained (start and end).
 3. Prioritize: hooks, funny/emotional moments, strong statements, plot twists, valuable info.
-Return all positions as integer seconds. Never return timestamp strings or decimal values. Timestamps are formatted by the application."#;
+Timestamps are within the provided video where 00:00:00 is the first frame. Return ONLY HH:MM:SS (exactly 8 chars, e.g. 00:01:23), zero-padded, 00:00:00 to 01:00:00. NEVER add milliseconds, decimals or extra zeros (e.g. 00:01:23.000 is FORBIDDEN)."#;
 
 // -------------------------------------------------------------------------------------------------
 // Video model detection
@@ -172,8 +174,7 @@ impl OpenRouterProvider {
         send_log(ctx, "Calling OpenRouter chat/completions (video_url)");
 
         let user_prompt =
-            "Analyze this video chunk and identify the best moments for YouTube Shorts."
-                .to_string();
+            "Analyze this video and identify the best moments for YouTube Shorts.".to_string();
 
         let mut payload = json!({
             "model": self.model,
@@ -219,10 +220,27 @@ impl OpenRouterProvider {
         let status = resp.status();
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         if !status.is_success() {
+            let body_str = body.to_string();
+            crate::debug::log_ai_http_error(
+                "openrouter",
+                &self.model,
+                &ctx.chunk_path,
+                &status.to_string(),
+                &body_str,
+            );
+            send_log(ctx, format!("OpenRouter failed ({status}): {body_str}"));
             anyhow::bail!("OpenRouter generate failed ({status}): {body}");
         }
 
         if body["choices"][0]["finish_reason"] == "length" {
+            let raw = body.to_string();
+            crate::debug::append_ai_log(&format!(
+                "provider=openrouter model={} chunk={} offset={}s LENGTH_TRUNCATED raw={}",
+                self.model,
+                ctx.chunk_path.display(),
+                ctx.chunk_start_offset.as_secs(),
+                raw
+            ));
             anyhow::bail!("structured response truncated: finish reason length");
         }
 
@@ -232,36 +250,106 @@ impl OpenRouterProvider {
             .or_else(|| body["choices"][0]["message"]["reasoning"].as_str())
             .ok_or_else(|| anyhow!("OpenRouter response missing content: {body}"))?;
 
+        tracing::info!(
+            "OpenRouter raw model={} chunk={} content={}",
+            self.model,
+            ctx.chunk_path.display(),
+            content
+        );
+
         // Content should already be JSON per response_format, but may be wrapped in markdown fence
         let json_str = extract_json(content);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_str).context("parsing structured moments json")?;
+        let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::debug::append_ai_log(&format!(
+                    "provider=openrouter model={} chunk={} offset={}s JSON_PARSE_ERROR error={} raw={}",
+                    self.model,
+                    ctx.chunk_path.display(),
+                    ctx.chunk_start_offset.as_secs(),
+                    e,
+                    json_str
+                ));
+                return Err(anyhow::Error::from(e).context("parsing structured moments json"));
+            }
+        };
         let moments = parsed["moments"]
             .as_array()
             .ok_or_else(|| anyhow!("moments array missing in response: {parsed}"))?;
 
         let offset = ctx.chunk_start_offset.as_secs();
         let mut out = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
         for m in moments {
-            let Some(start_seconds) = m["start_seconds"].as_u64() else {
+            let Some(start_str) = m["start_time"].as_str() else {
+                rejected.push(format!("missing start_time in {m}"));
                 continue;
             };
-            let Some(end_seconds) = m["end_seconds"].as_u64() else {
+            let Some(end_str) = m["end_time"].as_str() else {
+                rejected.push(format!("missing end_time in {m}"));
                 continue;
             };
-            if !valid_second_range(start_seconds, end_seconds) {
+            let Some(start_secs) = parse_timestamp_to_seconds(start_str) else {
+                rejected.push(format!(
+                    "bad start_time {start_str:?} in {m} (expected HH:MM:SS)"
+                ));
+                continue;
+            };
+            let Some(end_secs) = parse_timestamp_to_seconds(end_str) else {
+                rejected.push(format!(
+                    "bad end_time {end_str:?} in {m} (expected HH:MM:SS)"
+                ));
+                continue;
+            };
+            if !valid_second_range(start_secs, end_secs) {
+                rejected.push(format!(
+                    "invalid range start={start_secs} end={end_secs} in {m}"
+                ));
                 continue;
             }
             out.push(VideoMoment {
-                start_time: format_seconds_to_timestamp(start_seconds + offset),
-                end_time: format_seconds_to_timestamp(end_seconds + offset),
+                start_time: format_seconds_to_timestamp(start_secs + offset),
+                end_time: format_seconds_to_timestamp(end_secs + offset),
                 category: m["category"].as_str().unwrap_or("Other").to_owned(),
                 description: m["description"].as_str().unwrap_or("").to_owned(),
-                dialogue: parse_dialogue(m.get("dialogue")),
+                dialogue: parse_dialogue(m.get("dialogue"), offset),
             });
         }
+
+        let rejected_msg = if rejected.is_empty() {
+            None
+        } else {
+            Some(rejected.join(" | "))
+        };
+        crate::debug::log_ai_response(
+            "openrouter",
+            &self.model,
+            &ctx.chunk_path,
+            offset,
+            &json_str,
+            Some(&parsed),
+            out.len(),
+            rejected_msg.as_deref(),
+        );
+        if !rejected.is_empty() {
+            send_log(
+                ctx,
+                format!(
+                    "Rejected {} moments: {}",
+                    rejected.len(),
+                    rejected.join(" | ")
+                ),
+            );
+        }
+
         if !moments.is_empty() && out.is_empty() {
-            anyhow::bail!("structured response contained no valid timestamp ranges");
+            tracing::warn!(
+                "all {} moments rejected for chunk {} (offset {}s): {}",
+                moments.len(),
+                ctx.chunk_path.display(),
+                offset,
+                rejected_msg.as_deref().unwrap_or("unknown reason")
+            );
         }
         send_progress(ctx, 1.0);
         Ok(out)
@@ -282,21 +370,23 @@ fn extract_json(s: &str) -> String {
     t.to_owned()
 }
 
-fn parse_dialogue(value: Option<&serde_json::Value>) -> Vec<DialoguePhrase> {
+fn parse_dialogue(value: Option<&serde_json::Value>, offset: u64) -> Vec<DialoguePhrase> {
     let Some(arr) = value.and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     arr.iter()
         .filter_map(|d| {
-            let start = d["start_seconds"].as_u64()?;
-            let end = d["end_seconds"].as_u64()?;
+            let start_str = d["start_time"].as_str()?;
+            let end_str = d["end_time"].as_str()?;
+            let start = parse_timestamp_to_seconds(start_str)?;
+            let end = parse_timestamp_to_seconds(end_str)?;
             if !valid_second_range(start, end) {
                 return None;
             }
             let phrase = d["phrase"].as_str().or_else(|| d["text"].as_str())?;
             Some(DialoguePhrase {
-                start_time: format_seconds_to_timestamp(start),
-                end_time: format_seconds_to_timestamp(end),
+                start_time: format_seconds_to_timestamp(start + offset),
+                end_time: format_seconds_to_timestamp(end + offset),
                 phrase: phrase.to_owned(),
             })
         })
@@ -318,17 +408,13 @@ fn openrouter_response_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start_seconds": {
-                            "type": "integer",
-                            "description": "Start position in whole seconds relative to chunk start",
-                            "minimum": 0,
-                            "maximum": MAX_TIMESTAMP_SECONDS
+                        "start_time": {
+                            "type": "string",
+                            "description": "Start timestamp within the provided video as HH:MM:SS (e.g. 00:01:23) from 00:00:00 (first frame). Exactly 8 chars."
                         },
-                        "end_seconds": {
-                            "type": "integer",
-                            "description": "End position in whole seconds relative to chunk start and after start_seconds",
-                            "minimum": 0,
-                            "maximum": MAX_TIMESTAMP_SECONDS
+                        "end_time": {
+                            "type": "string",
+                            "description": "End timestamp within the provided video as HH:MM:SS (e.g. 00:01:45), 10-90s after start_time. Exactly HH:MM:SS."
                         },
                         "category": {
                             "type": "string",
@@ -346,29 +432,25 @@ fn openrouter_response_schema() -> serde_json::Value {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "start_seconds": {
-                                        "type": "integer",
-                                        "description": "Phrase start position in whole seconds relative to chunk start",
-                                        "minimum": 0,
-                                        "maximum": MAX_TIMESTAMP_SECONDS
+                                    "start_time": {
+                                        "type": "string",
+                                        "description": "Phrase start within the provided video as HH:MM:SS from 00:00:00, no milliseconds"
                                     },
-                                    "end_seconds": {
-                                        "type": "integer",
-                                        "description": "Phrase end position in whole seconds relative to chunk start",
-                                        "minimum": 0,
-                                        "maximum": MAX_TIMESTAMP_SECONDS
+                                    "end_time": {
+                                        "type": "string",
+                                        "description": "Phrase end within the provided video as HH:MM:SS from 00:00:00, no milliseconds"
                                     },
                                     "phrase": {
                                         "type": "string",
                                         "description": "Exact spoken phrase"
                                     }
                                 },
-                                "required": ["start_seconds", "end_seconds", "phrase"],
+                                "required": ["start_time", "end_time", "phrase"],
                                 "additionalProperties": false
                             }
                         }
                     },
-                    "required": ["start_seconds", "end_seconds", "category", "description"],
+                    "required": ["start_time", "end_time", "category", "description"],
                     "additionalProperties": false
                 }
             }
@@ -512,6 +594,7 @@ fn is_quota_error(e: &anyhow::Error) -> bool {
 
 fn is_transient_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
+    // "no valid timestamp ranges" is NOT transient — would loop 3x with same bad hallucination
     msg.contains("503")
         || msg.contains("500")
         || msg.contains("502")
@@ -521,7 +604,6 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
         || msg.contains("DEADLINE_EXCEEDED")
         || msg.contains("high demand")
         || msg.contains("finish reason length")
-        || msg.contains("no valid timestamp ranges")
         || msg.contains("overloaded")
         || msg.contains("temporarily")
         || msg.contains("try again later")

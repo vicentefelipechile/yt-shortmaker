@@ -37,21 +37,34 @@ pub struct VideoChunk {
 // Helpers
 // -------------------------------------------------------------------------------------------------
 
-/// Parses an `HH:MM:SS` timestamp to total seconds.
+/// Parses `HH:MM:SS` or `MM:SS` timestamp to total seconds.
 ///
-/// Returns `None` if the format is invalid.
+/// Accepts both `00:04:05` and `04:05` (and `4:05`) as produced by Gemini
+/// despite schema asking for `HH:MM:SS`. Returns `None` if the format is invalid.
 pub fn parse_timestamp_to_seconds(ts: &str) -> Option<u64> {
+    // Strip any fractional part (e.g. 00:04:05.000) — robust against model decimals
+    let ts = ts.split('.').next().unwrap_or(ts).trim();
     let parts: Vec<&str> = ts.split(':').collect();
-    if parts.len() != 3 {
-        return None;
+    match parts.len() {
+        2 => {
+            let m: u64 = parts[0].parse().ok()?;
+            let s: u64 = parts[1].parse().ok()?;
+            if m >= 60 || s >= 60 {
+                return None;
+            }
+            Some(m * 60 + s)
+        }
+        3 => {
+            let h: u64 = parts[0].parse().ok()?;
+            let m: u64 = parts[1].parse().ok()?;
+            let s: u64 = parts[2].parse().ok()?;
+            if m >= 60 || s >= 60 {
+                return None;
+            }
+            Some(h * 3600 + m * 60 + s)
+        }
+        _ => None,
     }
-    let h: u64 = parts[0].parse().ok()?;
-    let m: u64 = parts[1].parse().ok()?;
-    let s: u64 = parts[2].parse().ok()?;
-    if m >= 60 || s >= 60 {
-        return None;
-    }
-    Some(h * 3600 + m * 60 + s)
 }
 
 /// Formats total seconds as `HH:MM:SS`.
@@ -79,6 +92,9 @@ mod tests {
         assert_eq!(parse_timestamp_to_seconds("00:00:00"), Some(0));
         assert_eq!(parse_timestamp_to_seconds("00:01:30"), Some(90));
         assert_eq!(parse_timestamp_to_seconds("01:02:03"), Some(3723));
+        assert_eq!(parse_timestamp_to_seconds("04:05"), Some(245));
+        assert_eq!(parse_timestamp_to_seconds("4:05"), Some(245));
+        assert_eq!(parse_timestamp_to_seconds("00:04:05.000"), Some(245));
     }
 
     #[test]

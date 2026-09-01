@@ -12,7 +12,9 @@ use serde_json::json;
 
 use super::provider::{AiProvider, AnalyzeCtx, ProviderCapabilities, ProviderEvent};
 use crate::config::ProviderConfig;
-use crate::types::{format_seconds_to_timestamp, DialoguePhrase, VideoMoment};
+use crate::types::{
+    format_seconds_to_timestamp, parse_timestamp_to_seconds, DialoguePhrase, VideoMoment,
+};
 
 fn send_log(ctx: &AnalyzeCtx, msg: impl Into<String>) {
     if let Some(tx) = &ctx.progress_tx {
@@ -40,11 +42,11 @@ const MAX_OUTPUT_TOKENS: u64 = 4096;
 const MAX_TIMESTAMP_SECONDS: u64 = 3600;
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(240);
 
-const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video chunk and identify the best moments suitable for YouTube Shorts.
+const SYSTEM_PROMPT: &str = r#"You are a professional video editor assistant. Analyze the provided video and identify the best moments suitable for YouTube Shorts.
 1. Duration: 10 to 90 seconds per moment.
 2. Each moment must be self-contained (start and end).
 3. Prioritize: hooks, funny/emotional moments, strong statements, plot twists, valuable info.
-Return all positions as integer seconds. Never return timestamp strings or decimal values. Timestamps are formatted by the application."#;
+Timestamps are within the provided video where 00:00:00 is the first frame. Return ONLY HH:MM:SS (exactly 8 chars, e.g. 00:01:23), zero-padded, 00:00:00 to 01:00:00. NEVER add milliseconds, decimals or extra zeros (e.g. 00:01:23.000 is FORBIDDEN)."#;
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -275,8 +277,7 @@ impl GeminiProvider {
             ctx.chunk_path.display()
         );
         let user_prompt =
-            "Analyze this video chunk and identify the best moments for YouTube Shorts."
-                .to_string();
+            "Analyze this video and identify the best moments for YouTube Shorts.".to_string();
 
         // Gemini 3.x uses thinkingLevel (minimal ≈ off), Gemini 2.5 uses thinkingBudget=0
         // Docs: https://ai.google.dev/gemini-api/docs/thinking — 3.1-flash-lite does not support full off,
@@ -327,10 +328,30 @@ impl GeminiProvider {
         let status = resp.status();
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         if !status.is_success() {
+            let body_str = body.to_string();
+            crate::debug::log_ai_http_error(
+                "gemini",
+                &self.model,
+                &ctx.chunk_path,
+                &status.to_string(),
+                &body_str,
+            );
+            send_log(
+                ctx,
+                format!("generateContent failed ({status}): {}", body_str),
+            );
             anyhow::bail!("generateContent failed ({status}): {body}");
         }
 
         if body["candidates"][0]["finishReason"] == "MAX_TOKENS" {
+            let raw = body.to_string();
+            crate::debug::append_ai_log(&format!(
+                "provider=gemini model={} chunk={} offset={}s MAX_TOKENS raw={}",
+                self.model,
+                ctx.chunk_path.display(),
+                ctx.chunk_start_offset.as_secs(),
+                raw
+            ));
             anyhow::bail!("structured response truncated: finish reason MAX_TOKENS");
         }
 
@@ -338,34 +359,110 @@ impl GeminiProvider {
             .as_str()
             .ok_or_else(|| anyhow!("generateContent response missing text: {body}"))?;
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(text).context("parsing structured moments json")?;
+        // Always log raw text at INFO so it appears with RUST_LOG=info and in persistent file
+        tracing::info!(
+            "generateContent raw model={} chunk={} text={}",
+            self.model,
+            ctx.chunk_path.display(),
+            text
+        );
+
+        let parsed: serde_json::Value = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::debug::append_ai_log(&format!(
+                    "provider=gemini model={} chunk={} offset={}s JSON_PARSE_ERROR error={} raw={}",
+                    self.model,
+                    ctx.chunk_path.display(),
+                    ctx.chunk_start_offset.as_secs(),
+                    e,
+                    text
+                ));
+                return Err(anyhow::Error::from(e).context("parsing structured moments json"));
+            }
+        };
         let moments = parsed["moments"]
             .as_array()
             .ok_or_else(|| anyhow!("moments array missing in response"))?;
 
         let offset = ctx.chunk_start_offset.as_secs();
         let mut out = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
         for m in moments {
-            let Some(start_seconds) = m["start_seconds"].as_u64() else {
+            let Some(start_str) = m["start_time"].as_str() else {
+                rejected.push(format!("missing start_time in {m}"));
                 continue;
             };
-            let Some(end_seconds) = m["end_seconds"].as_u64() else {
+            let Some(end_str) = m["end_time"].as_str() else {
+                rejected.push(format!("missing end_time in {m}"));
                 continue;
             };
-            if !valid_second_range(start_seconds, end_seconds) {
+            let Some(start_secs) = parse_timestamp_to_seconds(start_str) else {
+                rejected.push(format!(
+                    "bad start_time {start_str:?} in {m} (expected HH:MM:SS)"
+                ));
+                continue;
+            };
+            let Some(end_secs) = parse_timestamp_to_seconds(end_str) else {
+                rejected.push(format!(
+                    "bad end_time {end_str:?} in {m} (expected HH:MM:SS)"
+                ));
+                continue;
+            };
+            if !valid_second_range(start_secs, end_secs) {
+                rejected.push(format!(
+                    "invalid range start={start_secs} end={end_secs} (must 0..{} and end>start) in {m}",
+                    MAX_TIMESTAMP_SECONDS
+                ));
                 continue;
             }
+            // Offset is applied HERE only — AI returns timestamps within the provided video (00:00:00 == first frame)
             out.push(VideoMoment {
-                start_time: format_seconds_to_timestamp(start_seconds + offset),
-                end_time: format_seconds_to_timestamp(end_seconds + offset),
+                start_time: format_seconds_to_timestamp(start_secs + offset),
+                end_time: format_seconds_to_timestamp(end_secs + offset),
                 category: m["category"].as_str().unwrap_or("Other").to_owned(),
                 description: m["description"].as_str().unwrap_or("").to_owned(),
-                dialogue: parse_dialogue(m.get("dialogue")),
+                dialogue: parse_dialogue(m.get("dialogue"), offset),
             });
         }
+
+        // Persist full trace for debugging "no valid timestamp ranges"
+        let rejected_msg = if rejected.is_empty() {
+            None
+        } else {
+            Some(rejected.join(" | "))
+        };
+        crate::debug::log_ai_response(
+            "gemini",
+            &self.model,
+            &ctx.chunk_path,
+            offset,
+            text,
+            Some(&parsed),
+            out.len(),
+            rejected_msg.as_deref(),
+        );
+        if !rejected.is_empty() {
+            send_log(
+                ctx,
+                format!(
+                    "Rejected {} moments: {}",
+                    rejected.len(),
+                    rejected.join(" | ")
+                ),
+            );
+        }
+
         if !moments.is_empty() && out.is_empty() {
-            anyhow::bail!("structured response contained no valid timestamp ranges");
+            tracing::warn!(
+                "all {} moments rejected for chunk {} (offset {}s): {}",
+                moments.len(),
+                ctx.chunk_path.display(),
+                offset,
+                rejected_msg.as_deref().unwrap_or("unknown reason")
+            );
+            // Don't bail as transient — would retry same bad prompt 3x and waste uploads.
+            // Return empty for this chunk so pipeline can continue.
         }
         tracing::info!(
             "generateContent done model={} elapsed={:?} moments={}",
@@ -414,21 +511,23 @@ impl GeminiProvider {
     }
 }
 
-fn parse_dialogue(value: Option<&serde_json::Value>) -> Vec<DialoguePhrase> {
+fn parse_dialogue(value: Option<&serde_json::Value>, offset: u64) -> Vec<DialoguePhrase> {
     let Some(arr) = value.and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     arr.iter()
         .filter_map(|d| {
-            let start = d["start_seconds"].as_u64()?;
-            let end = d["end_seconds"].as_u64()?;
+            let start_str = d["start_time"].as_str()?;
+            let end_str = d["end_time"].as_str()?;
+            let start = parse_timestamp_to_seconds(start_str)?;
+            let end = parse_timestamp_to_seconds(end_str)?;
             if !valid_second_range(start, end) {
                 return None;
             }
             let phrase = d["phrase"].as_str().or_else(|| d["text"].as_str())?;
             Some(DialoguePhrase {
-                start_time: format_seconds_to_timestamp(start),
-                end_time: format_seconds_to_timestamp(end),
+                start_time: format_seconds_to_timestamp(start + offset),
+                end_time: format_seconds_to_timestamp(end + offset),
                 phrase: phrase.to_owned(),
             })
         })
@@ -450,17 +549,13 @@ fn response_schema() -> serde_json::Value {
                 "items": {
                     "type": "OBJECT",
                     "properties": {
-                        "start_seconds": {
-                            "type": "INTEGER",
-                            "description": "Start position in whole seconds relative to chunk start",
-                            "minimum": 0,
-                            "maximum": MAX_TIMESTAMP_SECONDS
+                        "start_time": {
+                            "type": "STRING",
+                            "description": "Start timestamp within the provided video as HH:MM:SS (e.g. 00:01:23) from 00:00:00 (first frame). Exactly 8 chars, zero-padded. NEVER include milliseconds or decimals."
                         },
-                        "end_seconds": {
-                            "type": "INTEGER",
-                            "description": "End position in whole seconds relative to chunk start and after start_seconds",
-                            "minimum": 0,
-                            "maximum": MAX_TIMESTAMP_SECONDS
+                        "end_time": {
+                            "type": "STRING",
+                            "description": "End timestamp within the provided video as HH:MM:SS (e.g. 00:01:45), 10-90s after start_time. Exactly HH:MM:SS, no milliseconds."
                         },
                         "category": {
                             "type": "STRING",
@@ -478,30 +573,26 @@ fn response_schema() -> serde_json::Value {
                             "items": {
                                 "type": "OBJECT",
                                 "properties": {
-                                    "start_seconds": {
-                                        "type": "INTEGER",
-                                        "description": "Phrase start position in whole seconds relative to chunk start",
-                                        "minimum": 0,
-                                        "maximum": MAX_TIMESTAMP_SECONDS
+                                    "start_time": {
+                                        "type": "STRING",
+                                        "description": "Phrase start within the provided video as HH:MM:SS from 00:00:00, no milliseconds"
                                     },
-                                    "end_seconds": {
-                                        "type": "INTEGER",
-                                        "description": "Phrase end position in whole seconds relative to chunk start",
-                                        "minimum": 0,
-                                        "maximum": MAX_TIMESTAMP_SECONDS
+                                    "end_time": {
+                                        "type": "STRING",
+                                        "description": "Phrase end within the provided video as HH:MM:SS from 00:00:00, no milliseconds"
                                     },
                                     "phrase": {
                                         "type": "STRING",
                                         "description": "Exact spoken phrase"
                                     }
                                 },
-                                "required": ["start_seconds", "end_seconds", "phrase"],
-                                "propertyOrdering": ["start_seconds", "end_seconds", "phrase"]
+                                "required": ["start_time", "end_time", "phrase"],
+                                "propertyOrdering": ["start_time", "end_time", "phrase"]
                             }
                         }
                     },
-                    "required": ["start_seconds", "end_seconds", "category", "description"],
-                    "propertyOrdering": ["start_seconds", "end_seconds", "category", "description", "dialogue"]
+                    "required": ["start_time", "end_time", "category", "description"],
+                    "propertyOrdering": ["start_time", "end_time", "category", "description", "dialogue"]
                 }
             }
         },
@@ -642,6 +733,7 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     // 503 UNAVAILABLE (high demand), 500 INTERNAL, 502/504 gateway — all retryable
     // also JSON truncation due to MAX_TOKENS (EOF while parsing) and hanging generateContent
+    // Note: "no valid timestamp ranges" is NOT transient — retrying same prompt won't fix hallucinated out-of-chunk timestamps
     msg.contains("503")
         || msg.contains("500")
         || msg.contains("502")
@@ -656,7 +748,6 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
         || msg.contains("try again later")
         || msg.contains("EOF while parsing")
         || msg.contains("parsing structured moments json")
-        || msg.contains("no valid timestamp ranges")
         || msg.contains("timed out")
         || msg.contains("timeout")
         || msg.contains("Generate timeout")
@@ -691,13 +782,40 @@ mod tests {
     #[test]
     fn test_parse_dialogue_phrase_and_text_alias() {
         let v = json!([
-            { "start_seconds": 1, "end_seconds": 2, "phrase": "hello" },
-            { "start_seconds": 3, "end_seconds": 4, "text": "world" }
+            { "start_time": "00:00:01", "end_time": "00:00:02", "phrase": "hello" },
+            { "start_time": "00:00:03", "end_time": "00:00:04", "text": "world" }
         ]);
-        let phrases = parse_dialogue(Some(&v));
+        let phrases = parse_dialogue(Some(&v), 0);
         assert_eq!(phrases.len(), 2);
         assert_eq!(phrases[0].phrase, "hello");
         assert_eq!(phrases[1].phrase, "world");
+    }
+
+    #[test]
+    fn test_parse_dialogue_offset_applied() {
+        let v = json!([{ "start_time": "00:00:10", "end_time": "00:00:15", "phrase": "hi" }]);
+        let phrases = parse_dialogue(Some(&v), 600);
+        assert_eq!(phrases[0].start_time, "00:10:10");
+        assert_eq!(phrases[0].end_time, "00:10:15");
+    }
+
+    #[test]
+    fn test_reject_fractional_timestamp() {
+        // Fractional is now tolerated by stripping ".000" — prevents retry loop on 00:00:10.0000...
+        let v = json!([{ "start_time": "00:00:10.000", "end_time": "00:00:15", "phrase": "hi" }]);
+        let phrases = parse_dialogue(Some(&v), 0);
+        assert_eq!(phrases.len(), 1);
+        assert_eq!(parse_timestamp_to_seconds("00:00:10.000"), Some(10));
+        assert_eq!(phrases[0].start_time, "00:00:10");
+    }
+
+    #[test]
+    fn test_moment_offset_global() {
+        let offset = 600u64;
+        let start = 23u64;
+        let end = 45u64;
+        assert_eq!(format_seconds_to_timestamp(start + offset), "00:10:23");
+        assert_eq!(format_seconds_to_timestamp(end + offset), "00:10:45");
     }
 
     #[test]

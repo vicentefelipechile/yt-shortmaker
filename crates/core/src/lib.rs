@@ -6,6 +6,7 @@ rust_i18n::i18n!("../../locales", fallback = "en");
 
 pub mod ai;
 pub mod config;
+pub mod debug;
 pub mod media;
 pub mod plano;
 pub mod security;

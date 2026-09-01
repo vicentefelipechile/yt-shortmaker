@@ -335,7 +335,7 @@ fn apply_ai_settings_from_ui(cfg: &mut AppConfig, app: &MainWindow) {
 }
 
 fn refresh_keys_list(app: &MainWindow, config: &yt_shortmaker_core::config::AppConfig) {
-    let provider = config.ai.active_provider.clone();
+    let provider = config.ai.resolved_base_provider();
     let text = if let Some(p) = config.ai.providers.get(&provider) {
         if p.keys.is_empty() {
             t!("keys_no_keys").to_string()
@@ -965,9 +965,14 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
                 let mut cfg = config_rc.borrow_mut();
-                let provider = cfg.ai.active_provider.clone();
+                let provider = cfg.ai.resolved_base_provider();
                 if let Some(p) = cfg.ai.providers.get_mut(&provider) {
-                    let name = format!("Gemini Key {}", p.keys.len() + 1);
+                    let prefix = if provider == "openrouter" {
+                        "OpenRouter Key"
+                    } else {
+                        "Gemini Key"
+                    };
+                    let name = format!("{} {}", prefix, p.keys.len() + 1);
                     match yt_shortmaker_core::security::keyring::set_secret(
                         "yt-shortmaker",
                         &name,
@@ -1014,7 +1019,7 @@ fn main() -> anyhow::Result<()> {
         move || {
             if let Some(app) = app_weak.upgrade() {
                 let mut cfg = config_rc.borrow_mut();
-                let provider = cfg.ai.active_provider.clone();
+                let provider = cfg.ai.resolved_base_provider();
                 if let Some(p) = cfg.ai.providers.get_mut(&provider) {
                     if let Some(removed) = p.keys.pop() {
                         if let Err(e) = yt_shortmaker_core::security::keyring::delete_secret(
@@ -1050,7 +1055,7 @@ fn main() -> anyhow::Result<()> {
         move || {
             if let Some(app) = app_weak.upgrade() {
                 let mut cfg = config_rc.borrow_mut();
-                let provider = cfg.ai.active_provider.clone();
+                let provider = cfg.ai.resolved_base_provider();
                 if let Some(p) = cfg.ai.providers.get_mut(&provider) {
                     if let Some(last) = p.keys.last_mut() {
                         last.enabled = !last.enabled;
@@ -1084,7 +1089,7 @@ fn main() -> anyhow::Result<()> {
         move |idx: i32| {
             if let Some(app) = app_weak.upgrade() {
                 let mut cfg = config_rc.borrow_mut();
-                let provider = cfg.ai.active_provider.clone();
+                let provider = cfg.ai.resolved_base_provider();
                 let mut removed_name: Option<String> = None;
                 if let Some(p) = cfg.ai.providers.get_mut(&provider) {
                     let u = idx as usize;
@@ -1116,7 +1121,7 @@ fn main() -> anyhow::Result<()> {
         move |idx: i32| {
             if let Some(app) = app_weak.upgrade() {
                 let mut cfg = config_rc.borrow_mut();
-                let provider = cfg.ai.active_provider.clone();
+                let provider = cfg.ai.resolved_base_provider();
                 let mut ok = false;
                 if let Some(p) = cfg.ai.providers.get_mut(&provider) {
                     let u = idx as usize;
@@ -1204,6 +1209,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     let cfg_ref = config_rc.borrow();
                     refresh_models_list(&app, &cfg_ref);
+                    refresh_keys_list(&app, &cfg_ref);
                     app.set_models_status(format!("Selected '{}'", m.display_name).into());
                     app.set_selected_model_id(id.into());
                 }
@@ -1244,6 +1250,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 let cfg_ref = config_rc.borrow();
                 refresh_models_list(&app, &cfg_ref);
+                refresh_keys_list(&app, &cfg_ref);
                 app.set_models_status(format!("Model '{id}' deleted").into());
             }
         }
