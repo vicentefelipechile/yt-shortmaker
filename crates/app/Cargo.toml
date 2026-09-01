@@ -16,7 +16,6 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.17"
-open = "5.4"
 dirs = "6.0"
 rust-i18n = "4.2"
 chrono = "0.4"
