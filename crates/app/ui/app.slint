@@ -1,5 +1,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { ModelDrawer } from "./model-drawer.slint";
+import { StructureEditor } from "./structure-editor.slint";
+import { CanvasLayer, MomentRow, StructureLayerRow, StructureVideoRow } from "./structure-types.slint";
 import { NavItem, SquareButton, SquareChoice, SquareInput, SquareToggle } from "./components.slint";
 
 
@@ -145,6 +147,42 @@ export component MainWindow inherits Window {
     in property <string> tr-step-analyzing: "Analyzing";
     in property <string> tr-step-extracting: "Extracting shorts";
     in property <string> tr-step-saving: "Saving";
+    in property <string> tr-structure: "Structure";
+    in property <string> tr-structure-title: "Structure";
+    in property <string> tr-structure-desc: "Visual composition";
+    in property <string> tr-structure-empty: "Empty canvas.";
+    in property <string> tr-structure-no-video: "No video loaded.";
+    in property <string> tr-structure-save: "Save structure";
+    in property <string> tr-structure-save-template: "Save as global template";
+    in property <string> tr-structure-restore-template: "Restore global template";
+    in property <string> tr-structure-load-preset: "Load default preset";
+    in property <[StructureVideoRow]> structure-videos-model: [];
+    in property <[StructureLayerRow]> structure-layers-model: [];
+    in property <[CanvasLayer]> structure-canvas-layers: [];
+    in property <[MomentRow]> structure-moments-model: [];
+    in-out property <string> structure-selected-video-id: "";
+    in-out property <string> structure-selected-layer-id: "";
+    in property <string> structure-status: "";
+    in property <bool> structure-has-video: false;
+    in property <string> structure-inspector-name: "";
+    in property <string> structure-inspector-type: "";
+    in-out property <string> structure-inspector-x: "";
+    in-out property <string> structure-inspector-y: "";
+    in-out property <string> structure-inspector-w: "";
+    in-out property <string> structure-inspector-h: "";
+    in property <bool> structure-inspector-has-selection: false;
+    in-out property <string> structure-preview-second: "0";
+    in property <image> structure-preview-image;
+    in property <bool> structure-preview-rendering: false;
+    in property <string> structure-preview-status: "";
+    in property <bool> structure-preview-has-frame: false;
+    in-out property <string> structure-export-resolution: "1080x1920";
+    in-out property <string> structure-export-quality: "high";
+    in-out property <string> structure-export-fps: "30";
+    in property <bool> structure-export-running: false;
+    in property <int> structure-export-completed: 0;
+    in property <int> structure-export-total: 0;
+    in property <string> structure-export-status: "";
     in property <string> deps-error: "";
     in property <bool> deps-ok: true;
     in property <bool> deps-installing: false;
@@ -189,6 +227,30 @@ export component MainWindow inherits Window {
     callback select-model-id(string);
     callback delete-model-id(string);
     callback toggle-analysis-log();
+    callback select-structure-video(string);
+    callback save-structure();
+    callback save-global-template();
+    callback restore-global-template();
+    callback load-structure-preset();
+    callback select-structure-layer(string);
+    callback move-structure-layer(string, float, float);
+    callback resize-structure-layer(string, string, float, float);
+    callback toggle-structure-layer(string);
+    callback delete-structure-layer(string);
+    callback raise-structure-layer(string);
+    callback lower-structure-layer(string);
+    callback commit-structure-position();
+    callback commit-structure-size();
+    callback add-structure-clip();
+    callback add-structure-image();
+    callback add-structure-video();
+    callback add-structure-blur();
+    callback render-structure-preview();
+    callback render-structure-sample();
+    callback toggle-structure-moment(int);
+    callback start-structure-export();
+    callback cancel-structure-export();
+    callback retry-structure-export();
 
     HorizontalLayout {
         Rectangle {
@@ -211,6 +273,7 @@ export component MainWindow inherits Window {
                 VerticalLayout {
                     spacing: 2px;
                     NavItem { label: root.tr-home; active: route == "home" || route == "new-project"; clicked => { root.navigate("home"); } }
+                    NavItem { label: root.tr-structure; active: route == "structure"; clicked => { root.navigate("structure"); } }
                     NavItem { label: root.tr-export-standalone; active: route == "export"; clicked => { root.navigate("export"); } }
                     NavItem { label: root.tr-settings; active: route == "settings"; clicked => { root.navigate("settings"); } }
                     NavItem { label: root.tr-keys; active: route == "keys"; clicked => { root.navigate("keys"); } }
@@ -464,6 +527,67 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
+                    }
+
+                    if route == "structure": StructureEditor {
+                        title: root.tr-structure-title;
+                        description: root.tr-structure-desc;
+                        status: root.structure-status;
+                        has-video: root.structure-has-video;
+                        empty-text: root.structure-has-video ? root.tr-structure-empty : root.tr-structure-no-video;
+                        save-label: root.tr-structure-save;
+                        preset-label: root.tr-structure-load-preset;
+                        template-label: root.tr-structure-save-template;
+                        restore-label: root.tr-structure-restore-template;
+                        canvas-layers: root.structure-canvas-layers;
+                        layers-model: root.structure-layers-model;
+                        videos-model: root.structure-videos-model;
+                        selected-video-id <=> root.structure-selected-video-id;
+                        selected-layer-id <=> root.structure-selected-layer-id;
+                        select-video(id) => { root.select-structure-video(id); }
+                        inspector-name: root.structure-inspector-name;
+                        inspector-type: root.structure-inspector-type;
+                        inspector-x <=> root.structure-inspector-x;
+                        inspector-y <=> root.structure-inspector-y;
+                        inspector-w <=> root.structure-inspector-w;
+                        inspector-h <=> root.structure-inspector-h;
+                        inspector-has-selection: root.structure-inspector-has-selection;
+                        preview-second-text <=> root.structure-preview-second;
+                        preview-static-image: root.structure-preview-image;
+                        preview-rendering: root.structure-preview-rendering;
+                        preview-status: root.structure-preview-status;
+                        preview-has-frame: root.structure-preview-has-frame;
+                        save-structure => { root.save-structure(); }
+                        save-global-template => { root.save-global-template(); }
+                        restore-global-template => { root.restore-global-template(); }
+                        load-preset => { root.load-structure-preset(); }
+                        add-clip-layer => { root.add-structure-clip(); }
+                        add-image-layer => { root.add-structure-image(); }
+                        add-video-layer => { root.add-structure-video(); }
+                        add-blur-layer => { root.add-structure-blur(); }
+                        select-layer(id) => { root.select-structure-layer(id); }
+                        drag-layer(id, dx, dy) => { root.move-structure-layer(id, dx, dy); }
+                        resize-layer(id, handle, dx, dy) => { root.resize-structure-layer(id, handle, dx, dy); }
+                        toggle-layer(id) => { root.toggle-structure-layer(id); }
+                        delete-layer(id) => { root.delete-structure-layer(id); }
+                        raise-layer(id) => { root.raise-structure-layer(id); }
+                        lower-layer(id) => { root.lower-structure-layer(id); }
+                        commit-position => { root.commit-structure-position(); }
+                        commit-size => { root.commit-structure-size(); }
+                        render-preview-frame => { root.render-structure-preview(); }
+                        render-preview-sample => { root.render-structure-sample(); }
+                        moments-model: root.structure-moments-model;
+                        export-resolution <=> root.structure-export-resolution;
+                        export-quality <=> root.structure-export-quality;
+                        export-fps <=> root.structure-export-fps;
+                        export-running: root.structure-export-running;
+                        export-completed: root.structure-export-completed;
+                        export-total: root.structure-export-total;
+                        export-status: root.structure-export-status;
+                        toggle-moment(idx) => { root.toggle-structure-moment(idx); }
+                        start-export => { root.start-structure-export(); }
+                        cancel-export => { root.cancel-structure-export(); }
+                        retry-failed => { root.retry-structure-export(); }
                     }
 
                     if route == "export": VerticalLayout {

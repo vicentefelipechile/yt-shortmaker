@@ -1,7 +1,8 @@
 // =================================================================================================
-// plano — Declarative Plano compositing (stubs)
+// plano — Declarative Plano compositing
 // =================================================================================================
 
 pub mod compiler;
+pub mod export;
 pub mod preview;
 pub mod schema;

@@ -1,0 +1,216 @@
+// =================================================================================================
+// Structure editor shell (M5 Phase 1) — static layout, no canvas interaction yet
+// =================================================================================================
+
+import { ScrollView } from "std-widgets.slint";
+import { SquareButton } from "./components.slint";
+import { StructureCanvas } from "./structure-canvas.slint";
+import { StructureExportPanel } from "./structure-export.slint";
+import { StructureInspector } from "./structure-inspector.slint";
+import { StructureLayerPanel } from "./structure-layer-panel.slint";
+import { StructurePreview } from "./structure-preview.slint";
+import { CanvasLayer, MomentRow, StructureLayerRow, StructureVideoRow } from "./structure-types.slint";
+
+export component StructureEditor inherits Rectangle {
+    in property <string> title: "Structure";
+    in property <string> description: "";
+    in property <string> status: "";
+    in property <bool> has-video: false;
+    in property <string> empty-text: "Empty canvas.";
+    in property <string> save-label: "Save structure";
+    in property <string> preset-label: "Load default preset";
+    in property <string> template-label: "Save as global template";
+    in property <string> restore-label: "Restore global template";
+    in property <[CanvasLayer]> canvas-layers: [];
+    in property <[StructureLayerRow]> layers-model: [];
+    in property <[StructureVideoRow]> videos-model: [];
+    in-out property <string> selected-video-id: "";
+    in-out property <string> selected-layer-id: "";
+    in-out property <float> zoom: 0.3;
+    in property <string> inspector-name: "";
+    in property <string> inspector-type: "";
+    in-out property <string> inspector-x: "";
+    in-out property <string> inspector-y: "";
+    in-out property <string> inspector-w: "";
+    in-out property <string> inspector-h: "";
+    in property <bool> inspector-has-selection: false;
+    in-out property <string> preview-second-text: "0";
+    in property <image> preview-static-image;
+    in property <bool> preview-rendering: false;
+    in property <string> preview-status: "";
+    in property <bool> preview-has-frame: false;
+    in property <[MomentRow]> moments-model: [];
+    in-out property <string> export-resolution: "1080x1920";
+    in-out property <string> export-quality: "high";
+    in-out property <string> export-fps: "30";
+    in property <bool> export-running: false;
+    in property <int> export-completed: 0;
+    in property <int> export-total: 0;
+    in property <string> export-status: "";
+
+    callback save-structure();
+    callback save-global-template();
+    callback restore-global-template();
+    callback load-preset();
+    callback select-video(string);
+    callback add-clip-layer();
+    callback add-image-layer();
+    callback add-video-layer();
+    callback add-blur-layer();
+    callback select-layer(string);
+    callback drag-layer(string, float, float);
+    callback resize-layer(string, string, float, float);
+    callback toggle-layer(string);
+    callback delete-layer(string);
+    callback raise-layer(string);
+    callback lower-layer(string);
+    callback commit-position();
+    callback commit-size();
+    callback render-preview-frame();
+    callback render-preview-sample();
+    callback toggle-moment(int);
+    callback start-export();
+    callback cancel-export();
+    callback retry-failed();
+
+    background: #121214;
+
+    VerticalLayout {
+        spacing: 12px;
+        alignment: start;
+
+        Text { text: root.title; color: #ffffff; font-size: 17px; font-weight: 700; }
+        Rectangle { height: 1px; background: #27272a; }
+        Text { text: root.description; color: #b9bdc5; font-size: 13px; wrap: word-wrap; }
+
+        if !root.has-video: Rectangle {
+            background: #1a1a1e;
+            border-width: 1px;
+            border-color: #27272a;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                Text { text: root.empty-text; color: #858b96; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+
+        if root.videos-model.length > 0: Rectangle {
+            background: #1a1a1e;
+            border-width: 1px;
+            border-color: #27272a;
+            height: 64px;
+            clip: true;
+            ScrollView {
+                viewport-width: 1200px;
+                HorizontalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    Text { text: "Video:"; color: #71717a; font-size: 11px; vertical-alignment: center; }
+                    for v in root.videos-model: Rectangle {
+                        background: v.selected ? #2a2a2e : #202124;
+                        border-width: 1px;
+                        border-color: v.selected ? #6366f1 : #3d4149;
+                        width: 220px;
+                        height: 48px;
+                        TouchArea { clicked => { root.select-video(v.id); } }
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 1px;
+                            Text { text: v.title; color: #ffffff; font-size: 11px; }
+                            Text { text: v.duration + "  " + v.moments; color: #a1a1aa; font-size: 10px; }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            StructureCanvas {
+                horizontal-stretch: 1;
+                height: 460px;
+                layers: root.canvas-layers;
+                selected-layer-id <=> root.selected-layer-id;
+                zoom <=> root.zoom;
+                select-layer(id) => { root.select-layer(id); }
+                drag-layer(id, dx, dy) => { root.drag-layer(id, dx, dy); }
+                resize-layer(id, handle, dx, dy) => { root.resize-layer(id, handle, dx, dy); }
+            }
+            VerticalLayout {
+                width: 300px;
+                spacing: 10px;
+                StructureLayerPanel {
+                    height: 220px;
+                    model: root.layers-model;
+                    selected-layer-id: root.selected-layer-id;
+                    select-layer(id) => { root.select-layer(id); }
+                    toggle-layer(id) => { root.toggle-layer(id); }
+                    delete-layer(id) => { root.delete-layer(id); }
+                    raise-layer(id) => { root.raise-layer(id); }
+                    lower-layer(id) => { root.lower-layer(id); }
+                }
+                StructureInspector {
+                    vertical-stretch: 1;
+                    layer-id: root.selected-layer-id;
+                    layer-name: root.inspector-name;
+                    layer-type: root.inspector-type;
+                    position-x-text <=> root.inspector-x;
+                    position-y-text <=> root.inspector-y;
+                    width-text <=> root.inspector-w;
+                    height-text <=> root.inspector-h;
+                    has-selection: root.inspector-has-selection;
+                    commit-position => { root.commit-position(); }
+                    commit-size => { root.commit-size(); }
+                }
+            }
+        }
+
+        if root.canvas-layers.length == 0: Text { text: root.empty-text; color: #71717a; font-size: 11px; }
+
+        HorizontalLayout {
+            spacing: 10px;
+            StructurePreview {
+                horizontal-stretch: 1;
+                preview-second-text <=> root.preview-second-text;
+                static-image: root.preview-static-image;
+                rendering: root.preview-rendering;
+                status: root.preview-status;
+                has-frame: root.preview-has-frame;
+                update-frame => { root.render-preview-frame(); }
+                render-sample => { root.render-preview-sample(); }
+            }
+            StructureExportPanel {
+                width: 340px;
+                moments-model: root.moments-model;
+                resolution <=> root.export-resolution;
+                quality-preset <=> root.export-quality;
+                fps <=> root.export-fps;
+                exporting: root.export-running;
+                completed: root.export-completed;
+                total: root.export-total;
+                status: root.export-status;
+                toggle-moment(idx) => { root.toggle-moment(idx); }
+                start-export => { root.start-export(); }
+                cancel-export => { root.cancel-export(); }
+                retry-failed => { root.retry-failed(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            SquareButton { label: root.save-label; primary: true; width: 130px; clicked => { root.save-structure(); } }
+            SquareButton { label: root.preset-label; width: 150px; clicked => { root.load-preset(); } }
+            SquareButton { label: root.template-label; width: 170px; clicked => { root.save-global-template(); } }
+            SquareButton { label: root.restore-label; width: 170px; clicked => { root.restore-global-template(); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            SquareButton { label: "Clip"; width: 80px; clicked => { root.add-clip-layer(); } }
+            SquareButton { label: "Image"; width: 80px; clicked => { root.add-image-layer(); } }
+            SquareButton { label: "Video"; width: 80px; clicked => { root.add-video-layer(); } }
+            SquareButton { label: "Blur"; width: 80px; clicked => { root.add-blur-layer(); } }
+        }
+
+        if root.status != "": Text { text: root.status; color: #86efac; font-size: 12px; wrap: word-wrap; }
+    }
+}

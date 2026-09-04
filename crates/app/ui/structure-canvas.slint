@@ -1,0 +1,97 @@
+// =================================================================================================
+// Structure canvas (M5 Phase 2) — static grid, fixed frame, selectable layers
+// No drag/resize yet. ScrollView owns pan. Rust owns coordinates.
+// =================================================================================================
+
+import { ScrollView } from "std-widgets.slint";
+import { CanvasLayerItem } from "./structure-layer-item.slint";
+import { CanvasLayer } from "./structure-types.slint";
+
+export component StructureCanvas inherits Rectangle {
+    in property <[CanvasLayer]> layers: [];
+    in-out property <string> selected-layer-id: "";
+    in-out property <float> zoom: 0.3;
+    in property <int> output-width: 1080;
+    in property <int> output-height: 1920;
+
+    callback select-layer(string);
+    callback drag-layer(string, float, float);
+    callback resize-layer(string, string, float, float);
+
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            padding: 8px;
+            Text { text: "Canvas"; color: #818cf8; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: "Zoom"; color: #71717a; font-size: 11px; vertical-alignment: center; }
+        }
+
+        Rectangle { height: 1px; background: #27272a; }
+
+        ScrollView {
+            vertical-stretch: 1;
+            horizontal-stretch: 1;
+            viewport-width: 1080px * root.zoom + 80px;
+            viewport-height: 1920px * root.zoom + 80px;
+
+            Rectangle {
+                x: 40px;
+                y: 40px;
+                width: 1080px * root.zoom;
+                height: 1920px * root.zoom;
+                background: #121214;
+                border-width: 1px;
+                border-color: #3d4149;
+
+                // Grid (editor aid only, non-interactive)
+                for col in 12: Rectangle {
+                    x: parent.width / 12 * col;
+                    width: 1px;
+                    height: parent.height;
+                    background: #27272a;
+                }
+                for row in 20: Rectangle {
+                    y: parent.height / 20 * row;
+                    width: parent.width;
+                    height: 1px;
+                    background: #27272a;
+                }
+
+                // Layers (bottom -> top order)
+                for layer in root.layers: CanvasLayerItem {
+                    layer-id: layer.id;
+                    layer-type: layer.layer-type;
+                    layer-x: layer.x;
+                    layer-y: layer.y;
+                    layer-width: layer.width;
+                    layer-height: layer.height;
+                    layer-visible: layer.visible;
+                    selected: layer.selected;
+                    zoom: root.zoom;
+                    selected-layer => { root.select-layer(layer.id); }
+                    dragged(dx, dy) => { root.drag-layer(layer.id, dx, dy); }
+                    handle-dragged(handle, dx, dy) => { root.resize-layer(layer.id, handle, dx, dy); }
+                }
+
+                // Fixed output frame (visual reference only, no input)
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    border-width: 2px;
+                    border-color: #6366f1;
+                    background: transparent;
+                }
+            }
+        }
+    }
+}

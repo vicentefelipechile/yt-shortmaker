@@ -1,0 +1,60 @@
+// Preview panel — static frame + short sample, same compiler as export.
+
+import { SquareButton, SquareInput } from "./components.slint";
+
+export component StructurePreview inherits Rectangle {
+    in-out property <string> preview-second-text: "0";
+    in property <image> static-image;
+    in property <bool> rendering: false;
+    in property <string> status: "";
+    in property <bool> has-frame: false;
+
+    callback update-frame();
+    callback render-sample();
+
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        Text { text: "Preview"; color: #818cf8; font-size: 11px; font-weight: 700; }
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: "Second"; color: #e4e4e7; font-size: 11px; vertical-alignment: center; }
+            SquareInput { text <=> root.preview-second-text; placeholder-text: "0"; width: 80px; }
+            SquareButton { label: "Frame"; width: 80px; clicked => { root.update-frame(); } }
+            SquareButton { label: "Sample 4s"; width: 100px; clicked => { root.render-sample(); } }
+        }
+        if root.has-frame: Rectangle {
+            height: 220px;
+            background: #121214;
+            border-width: 1px;
+            border-color: #3a3c42;
+            clip: true;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.static-image;
+                image-fit: contain;
+            }
+        }
+        if !root.has-frame: Rectangle {
+            height: 60px;
+            background: #121214;
+            border-width: 1px;
+            border-color: #27272a;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.rendering ? "Working" : "No frame yet.";
+                color: #858b96;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.status != "": Text { text: root.status; color: #c3c6cc; font-size: 11px; wrap: word-wrap; }
+    }
+}

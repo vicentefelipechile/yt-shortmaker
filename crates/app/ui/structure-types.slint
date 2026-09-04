@@ -1,0 +1,43 @@
+// Shared M5 structs — single source of truth for Structure UI types
+
+export struct StructureVideoRow {
+    id: string,
+    title: string,
+    duration: string,
+    moments: string,
+    status: string,
+    selected: bool,
+}
+
+export struct StructureLayerRow {
+    id: string,
+    name: string,
+    layer-type: string,
+    visible: bool,
+    selected: bool,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+}
+
+export struct CanvasLayer {
+    id: string,
+    layer-type: string,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    visible: bool,
+    selected: bool,
+}
+
+export struct MomentRow {
+    index: int,
+    start: string,
+    end: string,
+    duration: string,
+    category: string,
+    selected: bool,
+    export-status: string,
+}

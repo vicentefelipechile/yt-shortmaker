@@ -1,5 +1,5 @@
 // =================================================================================================
-// cli::main — Headless CLI (preview/transform/batch/analyze)
+// cli::main â€” Headless CLI (preview/transform/batch/analyze)
 // =================================================================================================
 
 use std::path::Path;
@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 use yt_shortmaker_core::config::store as config_store;
 use yt_shortmaker_core::media::pipeline::{Pipeline, PipelineCtx, PipelineEvent};
-use yt_shortmaker_core::plano::schema::{create_default_plano, load_plano};
+use yt_shortmaker_core::plano::schema::{create_default_document, load_document};
 
 // -------------------------------------------------------------------------------------------------
 // Types
@@ -58,13 +58,13 @@ enum Commands {
 // Helpers
 // -------------------------------------------------------------------------------------------------
 
-fn resolve_plano(
+fn resolve_document(
     path: Option<String>,
-) -> anyhow::Result<Vec<yt_shortmaker_core::plano::schema::PlanoObject>> {
+) -> anyhow::Result<yt_shortmaker_core::plano::schema::PlanoDocument> {
     if let Some(p) = path {
-        load_plano(&p)
+        load_document(&p)
     } else {
-        Ok(create_default_plano())
+        Ok(create_default_document())
     }
 }
 
@@ -83,31 +83,53 @@ async fn main() -> anyhow::Result<()> {
             plano,
             output,
         } => {
-            let plano = resolve_plano(plano)?;
+            let doc = resolve_document(plano)?;
+            doc.validate().map_err(|e| anyhow::anyhow!(e))?;
+            let plano = doc.to_plano();
             let (filter, inputs) =
                 yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
             println!("inputs: {inputs:?}");
             println!("filter: {filter}");
             if let Some(out) = output {
-                println!("Would generate preview at {out} (requires ffmpeg)");
+                let cmd = yt_shortmaker_core::plano::export::build_frame_command(
+                    Path::new(&video),
+                    &doc,
+                    doc.preview_second,
+                    Path::new(&out),
+                )?;
+                yt_shortmaker_core::plano::export::run_render(&cmd)?;
+                println!("Preview written to {out}");
             }
         }
         Commands::Transform { video, out, plano } => {
-            let plano = resolve_plano(plano)?;
+            let doc = resolve_document(plano)?;
+            doc.validate_for_export().map_err(|e| anyhow::anyhow!(e))?;
             let out = out.unwrap_or_else(|| "output.mp4".into());
-            let (filter, inputs) =
-                yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(&plano, &video);
+            let dur = yt_shortmaker_core::media::ffmpeg::get_duration(Path::new(&video))
+                .unwrap_or(0.0) as u64;
+            let dur = dur.max(1);
+            let profile = yt_shortmaker_core::plano::export::ExportProfile::high_1080();
+            let cmd = yt_shortmaker_core::plano::export::build_sample_command(
+                Path::new(&video),
+                &doc,
+                0,
+                dur.min(30),
+                &profile,
+                Path::new(&out),
+            )?;
+            yt_shortmaker_core::plano::export::run_render(&cmd)?;
             println!("Transform {video} -> {out}");
-            println!("inputs: {inputs:?}");
-            println!("filter: {filter}");
         }
         Commands::Batch {
             input_dir,
             output_dir,
             plano,
         } => {
-            let plano = resolve_plano(plano)?;
+            let doc = resolve_document(plano)?;
+            doc.validate_for_export().map_err(|e| anyhow::anyhow!(e))?;
             let out = output_dir.unwrap_or_else(|| "./output".into());
+            std::fs::create_dir_all(&out)?;
+            let profile = yt_shortmaker_core::plano::export::ExportProfile::high_1080();
             let entries = std::fs::read_dir(&input_dir)?;
             let mut count = 0;
             for entry in entries.flatten() {
@@ -115,21 +137,27 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ext) = path.extension() {
                     if ext == "mp4" {
                         let out_path = Path::new(&out).join(format!("short_{count}.mp4"));
-                        let (filter, _) = yt_shortmaker_core::plano::compiler::build_ffmpeg_filter(
-                            &plano,
-                            &path.to_string_lossy(),
-                        );
-                        println!(
-                            "{} -> {} | filter len {}",
-                            path.display(),
-                            out_path.display(),
-                            filter.len()
-                        );
+                        let dur = yt_shortmaker_core::media::ffmpeg::get_duration(&path)
+                            .unwrap_or(0.0) as u64;
+                        let dur = dur.clamp(1, 90);
+                        // Batch reuses the shared sample/moment compiler with a 0-start window.
+                        let cmd = yt_shortmaker_core::plano::export::build_sample_command(
+                            &path,
+                            &doc,
+                            0,
+                            dur.min(30),
+                            &profile,
+                            &out_path,
+                        )?;
+                        match yt_shortmaker_core::plano::export::run_render(&cmd) {
+                            Ok(()) => println!("{} -> {} ok", path.display(), out_path.display()),
+                            Err(e) => eprintln!("{} failed: {e:#}", path.display()),
+                        }
                         count += 1;
                     }
                 }
             }
-            println!("Batch: {count} clips queued");
+            println!("Batch: {count} clips rendered");
         }
         Commands::Analyze { url, provider } => {
             yt_shortmaker_core::media::ytdlp::validate_media_url(&url)?;

@@ -1,0 +1,47 @@
+// Minimal inspector — numeric commit, no per-keystroke parsing.
+
+import { SquareButton, SquareInput } from "./components.slint";
+
+export component StructureInspector inherits Rectangle {
+    in property <string> layer-id: "";
+    in property <string> layer-name: "";
+    in property <string> layer-type: "";
+    in-out property <string> position-x-text: "";
+    in-out property <string> position-y-text: "";
+    in-out property <string> width-text: "";
+    in-out property <string> height-text: "";
+    in property <bool> has-selection: false;
+
+    callback commit-position();
+    callback commit-size();
+
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        Text { text: "Inspector"; color: #818cf8; font-size: 11px; font-weight: 700; }
+        if !root.has-selection: Text { text: "No layer selected."; color: #858b96; font-size: 11px; wrap: word-wrap; }
+        if root.has-selection: VerticalLayout {
+            spacing: 6px;
+            Text { text: root.layer-name; color: #ffffff; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+            Text { text: root.layer-type; color: #a1a1aa; font-size: 11px; }
+            Text { text: "Position X / Y"; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+            HorizontalLayout {
+                spacing: 6px;
+                SquareInput { text <=> root.position-x-text; placeholder-text: "0"; horizontal-stretch: 1; }
+                SquareInput { text <=> root.position-y-text; placeholder-text: "0"; horizontal-stretch: 1; }
+            }
+            SquareButton { label: "Apply position"; width: 130px; clicked => { root.commit-position(); } }
+            Text { text: "Size W / H"; color: #e4e4e7; font-size: 11px; font-weight: 600; }
+            HorizontalLayout {
+                spacing: 6px;
+                SquareInput { text <=> root.width-text; placeholder-text: "1080"; horizontal-stretch: 1; }
+                SquareInput { text <=> root.height-text; placeholder-text: "1920"; horizontal-stretch: 1; }
+            }
+            SquareButton { label: "Apply size"; width: 130px; clicked => { root.commit-size(); } }
+        }
+    }
+}

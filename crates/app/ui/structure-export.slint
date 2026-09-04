@@ -1,0 +1,85 @@
+// Export panel — moments table + batch controls, real model.
+
+import { ScrollView } from "std-widgets.slint";
+import { SquareButton, SquareChoice } from "./components.slint";
+import { MomentRow } from "./structure-types.slint";
+
+export component StructureExportPanel inherits Rectangle {
+    in property <[MomentRow]> moments-model: [];
+    in-out property <string> resolution: "1080x1920";
+    in-out property <string> quality-preset: "high";
+    in-out property <string> fps: "30";
+    in property <bool> exporting: false;
+    in property <int> completed: 0;
+    in property <int> total: 0;
+    in property <string> status: "";
+
+    callback toggle-moment(int);
+    callback start-export();
+    callback cancel-export();
+    callback retry-failed();
+
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        Text { text: "Export moments"; color: #818cf8; font-size: 11px; font-weight: 700; }
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: "Res"; color: #e4e4e7; font-size: 11px; vertical-alignment: center; }
+            SquareChoice { label: "1080x1920"; selected: root.resolution == "1080x1920"; chosen => { root.resolution = "1080x1920"; } }
+            SquareChoice { label: "720x1280"; selected: root.resolution == "720x1280"; chosen => { root.resolution = "720x1280"; } }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: "FPS"; color: #e4e4e7; font-size: 11px; vertical-alignment: center; }
+            SquareChoice { label: "30"; selected: root.fps == "30"; chosen => { root.fps = "30"; } }
+            SquareChoice { label: "60"; selected: root.fps == "60"; chosen => { root.fps = "60"; } }
+        }
+        Rectangle {
+            height: 160px;
+            background: #121214;
+            border-width: 1px;
+            border-color: #27272a;
+            ScrollView {
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 2px;
+                    if root.moments-model.length == 0: Text { text: "No moments loaded."; color: #858b96; font-size: 11px; }
+                    for m in root.moments-model: Rectangle {
+                        height: 30px;
+                        background: m.selected ? #2a2a2e : transparent;
+                        border-width: 1px;
+                        border-color: m.selected ? #6366f1 : #27272a;
+                        TouchArea { clicked => { root.toggle-moment(m.index); } }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 6px;
+                            spacing: 8px;
+                            Text { text: m.selected ? "[x]" : "[ ]"; color: #a1a1aa; font-size: 11px; vertical-alignment: center; }
+                            Text { text: m.start + " - " + m.end; color: #ffffff; font-size: 11px; vertical-alignment: center; }
+                            Text { text: m.category; color: #a1a1aa; font-size: 10px; vertical-alignment: center; horizontal-stretch: 1; }
+                            Text { text: m.export-status; color: #86efac; font-size: 10px; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            SquareButton { label: "Export"; primary: true; width: 100px; clicked => { root.start-export(); } }
+            SquareButton { label: "Cancel"; width: 90px; clicked => { root.cancel-export(); } }
+            SquareButton { label: "Retry"; width: 90px; clicked => { root.retry-failed(); } }
+            Text {
+                text: root.total > 0 ? root.completed + "/" + root.total : "";
+                color: #e4e4e7;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+        if root.status != "": Text { text: root.status; color: #c3c6cc; font-size: 11px; wrap: word-wrap; }
+    }
+}

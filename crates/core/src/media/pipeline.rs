@@ -1,5 +1,5 @@
 // =================================================================================================
-// media::pipeline — Download → Split → Analyze → Persist (video-centric, resume via folder+DB)
+// media::pipeline â€” Download â†’ Split â†’ Analyze â†’ Persist (video-centric, resume via folder+DB)
 // =================================================================================================
 
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ impl Pipeline {
         let cookies = &cfg.cookies;
         let provider_registry = build_registry(&cfg.ai);
 
-        // Stable id: centralized in session::resolve_stable_id — never timestamp/"video"
+        // Stable id: centralized in session::resolve_stable_id â€” never timestamp/"video"
         let video_id = session::resolve_stable_id(&ctx.url);
         tracing::info!(
             "pipeline start video_id={} url={} work_dir={}",
@@ -120,7 +120,7 @@ impl Pipeline {
         }
         drop(conn);
 
-        // 1. Download — verify folder+file+DB before deciding
+        // 1. Download â€” verify folder+file+DB before deciding
         check_cancelled(&ctx.cancellation)?;
         on_event(PipelineEvent::StageChanged(Stage::Downloading));
         let download_ok = is_download_verified(&video_id, &video_path);
@@ -190,7 +190,7 @@ impl Pipeline {
             on_event(PipelineEvent::Progress(1.0, "Download complete".into()));
         }
 
-        // 2. Split — verify folder+chunks+DB
+        // 2. Split â€” verify folder+chunks+DB
         check_cancelled(&ctx.cancellation)?;
         on_event(PipelineEvent::StageChanged(Stage::Splitting));
         on_event(PipelineEvent::Progress(0.0, "Splitting".into()));
@@ -239,11 +239,11 @@ impl Pipeline {
                 stored
             } else {
                 tracing::warn!(
-                    "split verified but DB len {} != expected {} — re-splitting",
+                    "split verified but DB len {} != expected {} â€” re-splitting",
                     stored.len(),
                     ranges.len()
                 );
-                // Mismatch despite verified flag — re-split
+                // Mismatch despite verified flag â€” re-split
                 split_and_persist(
                     &video_id,
                     &video_path,
@@ -288,7 +288,7 @@ impl Pipeline {
         };
         on_event(PipelineEvent::Progress(1.0, "Split complete".into()));
 
-        // 3. Analyze per chunk — resume by verifying each chunk's status sequentially
+        // 3. Analyze per chunk â€” resume by verifying each chunk's status sequentially
         let provider = provider_registry
             .active()
             .ok_or_else(|| anyhow::anyhow!("no active AI provider"))?;
@@ -307,9 +307,9 @@ impl Pipeline {
         let mut moments: Vec<VideoMoment> =
             session::get_job_moments(&conn, &video_id).unwrap_or_default();
         tracing::debug!("loaded {} existing moments for {}", moments.len(), video_id);
-        // Ensure we don't have more moments than expected due to prior partial run — keep as is
+        // Ensure we don't have more moments than expected due to prior partial run â€” keep as is
         drop(conn);
-        // Build set of already analyzed chunk indices (mutable — updated after each persist)
+        // Build set of already analyzed chunk indices (mutable â€” updated after each persist)
         let mut analyzed_set = get_analyzed_indices(&video_id);
         tracing::debug!("analyzed_set={:?} for {}", analyzed_set, video_id);
         for (i, vc) in chunks.iter().enumerate() {
@@ -326,7 +326,7 @@ impl Pipeline {
                 // Strictly verify file still exists before skipping
                 if !Path::new(&vc.file_path).exists() {
                     tracing::error!("chunk {} marked analyzed but missing {}", i, vc.file_path);
-                    anyhow::bail!("chunk {} marked analyzed but file missing at {} — abort resume to avoid skipping", i, vc.file_path);
+                    anyhow::bail!("chunk {} marked analyzed but file missing at {} â€” abort resume to avoid skipping", i, vc.file_path);
                 }
                 tracing::info!("chunk {}/{} skip cached", i + 1, total);
                 on_event(PipelineEvent::Log(format!(
@@ -348,7 +348,7 @@ impl Pipeline {
                         i,
                         prev
                     );
-                    anyhow::bail!("cannot analyze chunk {} before chunk {} is analyzed — strict order violated", i, prev);
+                    anyhow::bail!("cannot analyze chunk {} before chunk {} is analyzed â€” strict order violated", i, prev);
                 }
             }
             on_event(PipelineEvent::StageChanged(Stage::Analyzing {
@@ -511,13 +511,88 @@ impl Pipeline {
 
         if processing.auto_extract {
             on_event(PipelineEvent::StageChanged(Stage::Extracting));
-            let plano = crate::plano::schema::create_default_plano();
-            let info = crate::plano::preview::preview_info(&plano);
-            on_event(PipelineEvent::Log(format!(
-                "auto_extract: {info} - extraction ships with export milestone (M5)"
-            )));
-            let tmp_plano = ctx.work_dir.join("plano.json");
-            let _ = crate::plano::schema::save_plano(&tmp_plano.to_string_lossy(), &plano);
+            let struct_path = ctx.work_dir.join("structure.json");
+            if !struct_path.exists() {
+                on_event(PipelineEvent::Log(
+                    "auto_extract skipped: no structure.json, configure Structure first".into(),
+                ));
+            } else {
+                match crate::plano::schema::load_document(&struct_path.to_string_lossy()) {
+                    Ok(doc) => match doc.validate_for_export() {
+                        Ok(()) => {
+                            let profile = crate::plano::export::ExportProfile::high_1080();
+                            let struct_hash = crate::plano::export::structure_hash(&doc);
+                            let profile_hash = profile.hash();
+                            let slug = crate::util::slugify(&video_id);
+                            let shorts_dir = ctx.output_dir.join(slug).join("shorts");
+                            let _ = std::fs::create_dir_all(&shorts_dir);
+                            for (idx, m) in moments.iter().enumerate() {
+                                if ctx.cancellation.is_cancelled() {
+                                    on_event(PipelineEvent::Log("auto_extract cancelled".into()));
+                                    break;
+                                }
+                                let (Some(s), Some(e)) = (
+                                    crate::types::parse_timestamp_to_seconds(&m.start_time),
+                                    crate::types::parse_timestamp_to_seconds(&m.end_time),
+                                ) else {
+                                    on_event(PipelineEvent::Log(format!(
+                                        "skip moment {idx}: bad timestamps"
+                                    )));
+                                    continue;
+                                };
+                                let out = shorts_dir.join(format!("short_{:03}.mp4", idx + 1));
+                                match crate::plano::export::build_moment_command(
+                                    &video_path,
+                                    &doc,
+                                    s,
+                                    e,
+                                    &profile,
+                                    &out,
+                                ) {
+                                    Ok(cmd) => match crate::plano::export::run_render(&cmd) {
+                                        Ok(()) => {
+                                            on_event(PipelineEvent::Log(format!(
+                                                "extracted short_{:03}.mp4",
+                                                idx + 1
+                                            )));
+                                            if let Ok(db) = session::db_path() {
+                                                if let Ok(conn) = session::init_db(&db) {
+                                                    let _ = session::upsert_export(
+                                                        &conn,
+                                                        &session::ExportRecord {
+                                                            video_id: video_id.clone(),
+                                                            moment_idx: idx as i64,
+                                                            output_path: out
+                                                                .to_string_lossy()
+                                                                .to_string(),
+                                                            status: "completed".to_string(),
+                                                            error: None,
+                                                            structure_hash: struct_hash.clone(),
+                                                            profile_hash: profile_hash.clone(),
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => on_event(PipelineEvent::Log(format!(
+                                            "extract failed {idx}: {e:#}"
+                                        ))),
+                                    },
+                                    Err(e) => on_event(PipelineEvent::Log(format!(
+                                        "skip moment {idx}: {e:#}"
+                                    ))),
+                                }
+                            }
+                        }
+                        Err(e) => on_event(PipelineEvent::Log(format!(
+                            "auto_extract blocked: invalid structure: {e}"
+                        ))),
+                    },
+                    Err(e) => on_event(PipelineEvent::Log(format!(
+                        "auto_extract blocked: cannot load structure: {e:#}"
+                    ))),
+                }
+            }
         }
 
         tracing::info!(
@@ -543,7 +618,7 @@ impl Default for Pipeline {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Helpers — verification (folder + DB)
+// Helpers â€” verification (folder + DB)
 // -------------------------------------------------------------------------------------------------
 
 fn is_download_verified(video_id: &str, path: &Path) -> bool {
@@ -726,7 +801,7 @@ fn get_analyzed_indices(video_id: &str) -> std::collections::HashSet<i64> {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Helpers — download / split
+// Helpers â€” download / split
 // -------------------------------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -910,7 +985,7 @@ fn emit_ytdlp_line<F>(
                 ));
             }
         }
-        // Throttle textual log to ~1 Hz — main cause of UI freeze:
+        // Throttle textual log to ~1 Hz â€” main cause of UI freeze:
         // each Log triggers invoke_from_event_loop + get_analysis_log() clone
         // + set_analysis_log() + Text re-layout (wrap) in app.slint:620.
         if throttled && !is_final {

@@ -1,5 +1,5 @@
-// =================================================================================================
-// session — SQLite session persistence (video-centric, no projects list)
+﻿// =================================================================================================
+// session â€” SQLite session persistence (video-centric, no projects list)
 // =================================================================================================
 
 use std::path::{Path, PathBuf};
@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS video_cache (
 CREATE INDEX IF NOT EXISTS idx_video_cache_video_id ON video_cache(video_id);
 CREATE INDEX IF NOT EXISTS idx_job_chunks_video ON job_chunks(video_id);
 CREATE INDEX IF NOT EXISTS idx_job_moments_video ON job_moments(video_id);
+CREATE TABLE IF NOT EXISTS video_structures (
+  video_id TEXT PRIMARY KEY,
+  structure_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS job_exports (
+  video_id TEXT NOT NULL,
+  moment_idx INTEGER NOT NULL,
+  output_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  structure_hash TEXT NOT NULL DEFAULT '',
+  profile_hash TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  completed_at TEXT,
+  PRIMARY KEY (video_id, moment_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_job_exports_video ON job_exports(video_id);
 "#;
 
 // -------------------------------------------------------------------------------------------------
@@ -132,7 +150,7 @@ pub fn db_dir() -> Result<PathBuf> {
         .to_path_buf())
 }
 
-/// `img_cache/` lives in the **same directory** as `session.db` — all thumbnails and image
+/// `img_cache/` lives in the **same directory** as `session.db` â€” all thumbnails and image
 /// content are persisted here so the whole session is cacheable.
 pub fn img_cache_dir() -> Result<PathBuf> {
     Ok(db_dir()?.join("img_cache"))
@@ -145,7 +163,7 @@ pub fn ensure_img_cache_dir() -> Result<PathBuf> {
 }
 
 /// Deterministic thumbnail path for a given video_id (always under `img_cache/`).
-/// Extension is normalised to `.jpg` — yt-dlp thumbnails are almost always jpeg.
+/// Extension is normalised to `.jpg` â€” yt-dlp thumbnails are almost always jpeg.
 pub fn thumbnail_cache_path(video_id: &str) -> Result<PathBuf> {
     let safe = sanitize_id(video_id);
     Ok(img_cache_dir()?.join(format!("{safe}.jpg")))
@@ -174,7 +192,7 @@ pub fn video_download_path(video_id: &str) -> Result<PathBuf> {
 /// Resolve a stable, deterministic video_id for a URL.
 ///
 /// Order: 1) authoritative `video_cache` hit (yt-dlp id), 2) `ytdlp::extract_video_id` (YouTube/Twitch/generic),
-/// 3) `ytdlp::hash_url` fallback. Never generates a timestamp/random id — that broke resume ("siempre desde 0").
+/// 3) `ytdlp::hash_url` fallback. Never generates a timestamp/random id â€” that broke resume ("siempre desde 0").
 pub fn resolve_stable_id(url: &str) -> String {
     // 1) Exact URL cache hit, then id-variant fallback
     if let Ok(db) = db_path().and_then(|p| init_db(&p).map_err(|e| anyhow::anyhow!(e.to_string())))
@@ -186,7 +204,7 @@ pub fn resolve_stable_id(url: &str) -> String {
             if let Ok(Some(hit)) = get_cached_video_by_id(&db, &vid) {
                 return hit.video_id;
             }
-            // No cache — deterministic extract is stable
+            // No cache â€” deterministic extract is stable
             return vid;
         }
     } else if let Some(vid) = crate::media::ytdlp::extract_video_id(url) {
@@ -437,7 +455,7 @@ pub fn delete_video_job(conn: &Connection, video_id: &str) -> Result<()> {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Video cache (fetch_info) — SQLite + img_cache/
+// Video cache (fetch_info) â€” SQLite + img_cache/
 // -------------------------------------------------------------------------------------------------
 
 pub fn upsert_cached_video(conn: &Connection, cached: &CachedVideo) -> Result<()> {
@@ -521,6 +539,119 @@ pub fn cached_thumbnail_on_disk(video_id: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Structures and exports (M5)
+// -------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRecord {
+    pub video_id: String,
+    pub moment_idx: i64,
+    pub output_path: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub structure_hash: String,
+    pub profile_hash: String,
+}
+
+pub fn upsert_video_structure(conn: &Connection, video_id: &str, json: &str) -> Result<()> {
+    let now = chrono::Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO video_structures (video_id, structure_json, updated_at)
+          VALUES (?1, ?2, ?3)
+          ON CONFLICT(video_id) DO UPDATE SET structure_json=excluded.structure_json, updated_at=excluded.updated_at",
+        params![video_id, json, now],
+    )
+    .context("upserting video structure")?;
+    Ok(())
+}
+
+pub fn get_video_structure(conn: &Connection, video_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT structure_json FROM video_structures WHERE video_id = ?1",
+        params![video_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("querying video structure")
+}
+
+pub fn upsert_export(conn: &Connection, rec: &ExportRecord) -> Result<()> {
+    let now = chrono::Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO job_exports (video_id, moment_idx, output_path, status, error, structure_hash, profile_hash, started_at, completed_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)
+          ON CONFLICT(video_id, moment_idx) DO UPDATE SET
+            output_path=excluded.output_path, status=excluded.status, error=excluded.error,
+            structure_hash=excluded.structure_hash, profile_hash=excluded.profile_hash,
+            started_at=excluded.started_at",
+        params![
+            rec.video_id,
+            rec.moment_idx,
+            rec.output_path,
+            rec.status,
+            rec.error,
+            rec.structure_hash,
+            rec.profile_hash,
+            now
+        ],
+    )
+    .context("upserting export")?;
+    Ok(())
+}
+
+pub fn get_exports(conn: &Connection, video_id: &str) -> Result<Vec<ExportRecord>> {
+    let mut stmt = conn
+        .prepare("SELECT video_id, moment_idx, output_path, status, error, structure_hash, profile_hash FROM job_exports WHERE video_id = ?1 ORDER BY moment_idx")
+        .context("preparing get exports")?;
+    let rows = stmt
+        .query_map(params![video_id], |row| {
+            Ok(ExportRecord {
+                video_id: row.get(0)?,
+                moment_idx: row.get(1)?,
+                output_path: row.get(2)?,
+                status: row.get(3)?,
+                error: row.get(4)?,
+                structure_hash: row.get(5)?,
+                profile_hash: row.get(6)?,
+            })
+        })
+        .context("querying exports")?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.context("mapping export row")?);
+    }
+    Ok(out)
+}
+
+pub fn list_analyzed_videos(conn: &Connection) -> Result<Vec<VideoJob>> {
+    let mut stmt = conn
+        .prepare("SELECT video_id, url, title, duration, work_dir, download_path, download_verified, split_verified, total_chunks, analyzed_chunks, status FROM video_jobs ORDER BY updated_at DESC")
+        .context("preparing list videos")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(VideoJob {
+                video_id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                duration: row.get(3)?,
+                work_dir: row.get(4)?,
+                download_path: row.get(5)?,
+                download_verified: row.get::<_, i64>(6)? != 0,
+                split_verified: row.get::<_, i64>(7)? != 0,
+                total_chunks: row.get(8)?,
+                analyzed_chunks: row.get(9)?,
+                status: row.get(10)?,
+            })
+        })
+        .context("querying videos")?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.context("mapping video row")?);
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -682,5 +813,29 @@ mod tests {
         let p = video_work_dir("dQw4w9WgXcQ").unwrap();
         assert!(p.to_string_lossy().contains("videos"));
         assert_eq!(p.file_name().unwrap().to_string_lossy(), "dQw4w9WgXcQ");
+    }
+
+    #[test]
+    fn test_structures_and_exports() {
+        let dir = tempdir().unwrap();
+        let conn = init_db(&dir.path().join("test.db")).unwrap();
+        upsert_video_structure(&conn, "v1", r#"{"version":1}"#).unwrap();
+        assert_eq!(
+            get_video_structure(&conn, "v1").unwrap().unwrap(),
+            r#"{"version":1}"#
+        );
+        let rec = ExportRecord {
+            video_id: "v1".into(),
+            moment_idx: 0,
+            output_path: "/tmp/short_001.mp4".into(),
+            status: "completed".into(),
+            error: None,
+            structure_hash: "s1".into(),
+            profile_hash: "p1".into(),
+        };
+        upsert_export(&conn, &rec).unwrap();
+        let loaded = get_exports(&conn, "v1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].status, "completed");
     }
 }

@@ -106,6 +106,15 @@ fn apply_translations(app: &MainWindow) {
     app.set_tr_select_model(t!("select_model").to_string().into());
     app.set_tr_delete_model(t!("delete_model").to_string().into());
     app.set_tr_models_title(t!("models_title").to_string().into());
+    app.set_tr_structure(t!("nav_structure").to_string().into());
+    app.set_tr_structure_title(t!("structure_title").to_string().into());
+    app.set_tr_structure_desc(t!("structure_description").to_string().into());
+    app.set_tr_structure_empty(t!("structure_empty").to_string().into());
+    app.set_tr_structure_no_video(t!("structure_no_video").to_string().into());
+    app.set_tr_structure_save(t!("structure_save").to_string().into());
+    app.set_tr_structure_save_template(t!("structure_save_template").to_string().into());
+    app.set_tr_structure_restore_template(t!("structure_restore_template").to_string().into());
+    app.set_tr_structure_load_preset(t!("structure_load_preset").to_string().into());
 }
 
 const LOG_RING_CAP: usize = 400;
@@ -433,6 +442,390 @@ fn work_dir_for(video_id: &str) -> std::path::PathBuf {
     session::video_work_dir_or_tmp(video_id)
 }
 
+fn global_template_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| {
+        d.join(yt_shortmaker_core::config::APP_DIR_NAME)
+            .join("structures")
+            .join("default.json")
+    })
+}
+
+fn structure_path_for(video_id: &str) -> std::path::PathBuf {
+    work_dir_for(video_id).join("structure.json")
+}
+
+fn active_video_id(app: &MainWindow) -> String {
+    let sel: String = app.get_structure_selected_video_id().into();
+    if !sel.trim().is_empty() {
+        return sel;
+    }
+    app.get_video_id().to_string()
+}
+
+fn resolve_active_video_path(app: &MainWindow) -> Option<std::path::PathBuf> {
+    let vid = active_video_id(app);
+    if vid.trim().is_empty() {
+        return None;
+    }
+    if let Ok(db_path) = session::db_path() {
+        if let Ok(conn) = session::init_db(&db_path) {
+            if let Ok(Some(job)) = session::get_video_job(&conn, &vid) {
+                if let Some(p) = job.download_path {
+                    let pb = std::path::PathBuf::from(&p);
+                    if pb.exists() {
+                        return Some(pb);
+                    }
+                }
+            }
+        }
+    }
+    let fallback = work_dir_for(&vid).join(format!("{vid}.mp4"));
+    if fallback.exists() {
+        return Some(fallback);
+    }
+    // Last resort: work dir path even if missing, to surface a clear error downstream.
+    Some(fallback)
+}
+
+fn document_to_canvas_layers(
+    doc: &yt_shortmaker_core::plano::schema::PlanoDocument,
+    selected_id: &str,
+) -> Vec<CanvasLayer> {
+    use yt_shortmaker_core::plano::schema::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
+    doc.layers
+        .iter()
+        .map(|l| {
+            let (w, h, x, y) = match &l.object {
+                yt_shortmaker_core::plano::schema::PlanoObject::Clip { position, .. } => {
+                    let w = position.width.resolve(OUTPUT_WIDTH);
+                    let h = position.height.resolve(OUTPUT_HEIGHT);
+                    (
+                        w,
+                        h,
+                        position.x.resolve(OUTPUT_WIDTH, w),
+                        position.y.resolve(OUTPUT_HEIGHT, h),
+                    )
+                }
+                yt_shortmaker_core::plano::schema::PlanoObject::Image { position, .. } => {
+                    let w = position.width.resolve(OUTPUT_WIDTH);
+                    let h = position.height.resolve(OUTPUT_HEIGHT);
+                    (
+                        w,
+                        h,
+                        position.x.resolve(OUTPUT_WIDTH, w),
+                        position.y.resolve(OUTPUT_HEIGHT, h),
+                    )
+                }
+                yt_shortmaker_core::plano::schema::PlanoObject::Shader { position, .. } => {
+                    let w = position.width.resolve(OUTPUT_WIDTH);
+                    let h = position.height.resolve(OUTPUT_HEIGHT);
+                    (
+                        w,
+                        h,
+                        position.x.resolve(OUTPUT_WIDTH, w),
+                        position.y.resolve(OUTPUT_HEIGHT, h),
+                    )
+                }
+                yt_shortmaker_core::plano::schema::PlanoObject::Video { position, .. } => {
+                    let w = position.width.resolve(OUTPUT_WIDTH);
+                    let h = position.height.resolve(OUTPUT_HEIGHT);
+                    (
+                        w,
+                        h,
+                        position.x.resolve(OUTPUT_WIDTH, w),
+                        position.y.resolve(OUTPUT_HEIGHT, h),
+                    )
+                }
+            };
+            CanvasLayer {
+                id: l.id.clone().into(),
+                layer_type: l.layer_type().into(),
+                x: x as f32,
+                y: y as f32,
+                width: w as f32,
+                height: h as f32,
+                visible: l.visible,
+                selected: l.id == selected_id,
+            }
+        })
+        .collect()
+}
+
+fn document_to_layer_rows(
+    doc: &yt_shortmaker_core::plano::schema::PlanoDocument,
+    selected_id: &str,
+) -> Vec<StructureLayerRow> {
+    use yt_shortmaker_core::plano::schema::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
+    doc.layers
+        .iter()
+        .map(|l| {
+            let (x, y, w, h) = {
+                let (rx, ry, rw, rh) = l.resolved_rect();
+                let _ = (OUTPUT_WIDTH, OUTPUT_HEIGHT);
+                (rx as f32, ry as f32, rw as f32, rh as f32)
+            };
+            StructureLayerRow {
+                id: l.id.clone().into(),
+                name: l.name.clone().into(),
+                layer_type: l.layer_type().into(),
+                visible: l.visible,
+                selected: l.id == selected_id,
+                x,
+                y,
+                width: w,
+                height: h,
+            }
+        })
+        .collect()
+}
+
+fn refresh_structure_inspector(
+    app: &MainWindow,
+    doc: &yt_shortmaker_core::plano::schema::PlanoDocument,
+) {
+    let selected: String = app.get_structure_selected_layer_id().into();
+    if let Some(l) = doc.layers.iter().find(|x| x.id == selected) {
+        let (x, y, w, h) = l.resolved_rect();
+        app.set_structure_inspector_name(l.name.clone().into());
+        app.set_structure_inspector_type(l.layer_type().into());
+        // Only overwrite text fields when selection changed to avoid clobbering typing.
+        // For Phase inspector we refresh on selection change; commits re-refresh after save.
+        app.set_structure_inspector_x(x.to_string().into());
+        app.set_structure_inspector_y(y.to_string().into());
+        app.set_structure_inspector_w(w.to_string().into());
+        app.set_structure_inspector_h(h.to_string().into());
+        app.set_structure_inspector_has_selection(true);
+    } else {
+        app.set_structure_inspector_name("".into());
+        app.set_structure_inspector_type("".into());
+        app.set_structure_inspector_has_selection(false);
+    }
+}
+
+fn refresh_structure_videos(app: &MainWindow) -> Vec<String> {
+    let jobs: Vec<session::VideoJob> = (|| {
+        let db_path = session::db_path().ok()?;
+        let conn = session::init_db(&db_path).ok()?;
+        session::list_analyzed_videos(&conn).ok()
+    })()
+    .unwrap_or_default();
+    let selected: String = app.get_structure_selected_video_id().into();
+    let home_vid: String = app.get_video_id().into();
+    let rows: Vec<StructureVideoRow> = jobs
+        .iter()
+        .map(|j| {
+            let is_sel = if !selected.trim().is_empty() {
+                j.video_id == selected
+            } else {
+                j.video_id == home_vid
+            };
+            let moments = format!("{} moments", j.analyzed_chunks);
+            StructureVideoRow {
+                id: j.video_id.clone().into(),
+                title: j.title.clone().into(),
+                duration: yt_shortmaker_core::util::format_duration(j.duration as u64).into(),
+                moments: moments.into(),
+                status: j.status.clone().into(),
+                selected: is_sel,
+            }
+        })
+        .collect();
+    let ids: Vec<String> = jobs.into_iter().map(|j| j.video_id).collect();
+    app.set_structure_videos_model(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+    ids
+}
+
+fn refresh_structure_ui(app: &MainWindow) {
+    let available = refresh_structure_videos(app);
+    let sel: String = app.get_structure_selected_video_id().into();
+    let home: String = app.get_video_id().into();
+    let vid = if !sel.trim().is_empty() {
+        sel
+    } else if !home.trim().is_empty() {
+        home
+    } else if let Some(first) = available.first() {
+        first.clone()
+    } else {
+        String::new()
+    };
+    if vid.trim().is_empty() {
+        app.set_structure_has_video(false);
+        app.set_structure_selected_video_id("".into());
+        app.set_structure_status(t!("structure_no_video").to_string().into());
+        app.set_structure_canvas_layers(
+            std::rc::Rc::new(slint::VecModel::from(Vec::<CanvasLayer>::new())).into(),
+        );
+        app.set_structure_layers_model(
+            std::rc::Rc::new(slint::VecModel::from(Vec::<StructureLayerRow>::new())).into(),
+        );
+        app.set_structure_inspector_has_selection(false);
+        refresh_structure_moments(app, &vid);
+        return;
+    }
+    app.set_structure_has_video(true);
+    app.set_structure_selected_video_id(vid.clone().into());
+    // Keep videos-model selection in sync without rebuilding twice.
+    refresh_structure_videos(app);
+    let selected: String = app.get_structure_selected_layer_id().into();
+    let path = structure_path_for(&vid);
+    if path.exists() {
+        match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy()) {
+            Ok(doc) => {
+                let canvas = document_to_canvas_layers(&doc, &selected);
+                let rows = document_to_layer_rows(&doc, &selected);
+                app.set_structure_canvas_layers(
+                    std::rc::Rc::new(slint::VecModel::from(canvas)).into(),
+                );
+                app.set_structure_layers_model(
+                    std::rc::Rc::new(slint::VecModel::from(rows)).into(),
+                );
+                // Preserve in-progress typing: only refresh inspector when selection changed
+                // or when fields are empty. Commits explicitly refresh after save.
+                let needs_inspector = app.get_structure_inspector_x().is_empty()
+                    || app.get_structure_inspector_has_selection()
+                        != doc.layers.iter().any(|x| x.id == selected);
+                if needs_inspector || !app.get_structure_inspector_has_selection() {
+                    refresh_structure_inspector(app, &doc);
+                } else if let Some(l) = doc.layers.iter().find(|x| x.id == selected) {
+                    app.set_structure_inspector_name(l.name.clone().into());
+                    app.set_structure_inspector_type(l.layer_type().into());
+                    app.set_structure_inspector_has_selection(true);
+                } else {
+                    refresh_structure_inspector(app, &doc);
+                }
+                if let Err(e) = doc.validate_for_export() {
+                    // Empty canvas is a normal state, not an error status that blocks editing.
+                    if doc.layers.is_empty() {
+                        if app.get_structure_status().is_empty() {
+                            app.set_structure_status(t!("structure_empty").to_string().into());
+                        }
+                    } else {
+                        app.set_structure_status(
+                            format!("{}: {e}", t!("structure_status_empty_invalid")).into(),
+                        );
+                    }
+                } else {
+                    app.set_structure_status(
+                        format!(
+                            "{}: {} layers",
+                            t!("structure_status_saved"),
+                            doc.layers.len()
+                        )
+                        .into(),
+                    );
+                }
+                refresh_structure_moments(app, &vid);
+            }
+            Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+        }
+    } else {
+        app.set_structure_canvas_layers(
+            std::rc::Rc::new(slint::VecModel::from(Vec::<CanvasLayer>::new())).into(),
+        );
+        app.set_structure_layers_model(
+            std::rc::Rc::new(slint::VecModel::from(Vec::<StructureLayerRow>::new())).into(),
+        );
+        app.set_structure_inspector_has_selection(false);
+        if app.get_structure_status().is_empty() {
+            app.set_structure_status(t!("structure_empty").to_string().into());
+        }
+    }
+}
+
+static EXPORT_CANCEL: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+fn export_cancel_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    EXPORT_CANCEL
+        .get_or_init(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .clone()
+}
+
+fn refresh_structure_moments(app: &MainWindow, vid: &str) {
+    use slint::{Model, ModelRc, VecModel};
+    let existing_sel: std::collections::HashSet<i32> = app
+        .get_structure_moments_model()
+        .iter()
+        .filter(|r| r.selected)
+        .map(|r| r.index)
+        .collect();
+    let (moments, exports): (
+        Vec<yt_shortmaker_core::types::VideoMoment>,
+        Vec<session::ExportRecord>,
+    ) = (|| -> Option<(
+        Vec<yt_shortmaker_core::types::VideoMoment>,
+        Vec<session::ExportRecord>,
+    )> {
+        let db_path = session::db_path().ok()?;
+        let conn = session::init_db(&db_path).ok()?;
+        let m = session::get_job_moments(&conn, vid).unwrap_or_default();
+        let e = session::get_exports(&conn, vid).unwrap_or_default();
+        Some((m, e))
+    })()
+    .unwrap_or_default();
+    let rows: Vec<MomentRow> = moments
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let dur = (|| {
+                let s = yt_shortmaker_core::types::parse_timestamp_to_seconds(&m.start_time)?;
+                let e = yt_shortmaker_core::types::parse_timestamp_to_seconds(&m.end_time)?;
+                Some(e.saturating_sub(s))
+            })()
+            .unwrap_or(0);
+            let status = exports
+                .iter()
+                .find(|x| x.moment_idx as usize == i)
+                .map(|x| x.status.clone())
+                .unwrap_or_else(|| "pending".to_string());
+            MomentRow {
+                index: i as i32,
+                start: m.start_time.clone().into(),
+                end: m.end_time.clone().into(),
+                duration: format!("{dur}s").into(),
+                category: m.category.clone().into(),
+                selected: existing_sel.contains(&(i as i32)),
+                export_status: status.into(),
+            }
+        })
+        .collect();
+    app.set_structure_moments_model(std::rc::Rc::new(VecModel::from(rows)).into());
+    let _ = ModelRc::new(VecModel::from(Vec::<MomentRow>::new()));
+}
+
+fn with_structure_doc<F>(app: &MainWindow, f: F)
+where
+    F: FnOnce(&mut yt_shortmaker_core::plano::schema::PlanoDocument) -> Result<(), String>,
+{
+    let vid: String = app.get_structure_selected_video_id().into();
+    let vid = if vid.trim().is_empty() {
+        app.get_video_id().to_string()
+    } else {
+        vid
+    };
+    if vid.trim().is_empty() {
+        app.set_structure_status(t!("structure_no_video").to_string().into());
+        return;
+    }
+    let path = structure_path_for(&vid);
+    let mut doc = match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy()) {
+        Ok(d) => d,
+        Err(e) => {
+            app.set_structure_status(format!("{}: {e}", t!("error")).into());
+            return;
+        }
+    };
+    match f(&mut doc) {
+        Ok(()) => {
+            match yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc) {
+                Ok(()) => refresh_structure_ui(app),
+                Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+            }
+        }
+        Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+    }
+}
+
 fn ensure_video_job(video_id: &str, url: &str, title: &str, duration: f64) {
     let work_dir = work_dir_for(video_id);
     let _ = std::fs::create_dir_all(&work_dir);
@@ -522,12 +915,16 @@ fn main() -> anyhow::Result<()> {
         move |route| {
             if let Some(app) = app_weak.upgrade() {
                 // Normalize legacy new-project route to home (single video flow)
-                let route = if route == "new-project" {
+                let route: slint::SharedString = if route == "new-project" {
                     "home".into()
                 } else {
                     route
                 };
+                let is_structure = route.as_str() == "structure";
                 app.set_route(route);
+                if is_structure {
+                    refresh_structure_ui(&app);
+                }
             }
         }
     });
@@ -1510,6 +1907,992 @@ fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    app.on_select_structure_video({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_structure_selected_video_id(id);
+                refresh_structure_ui(&app);
+            }
+        }
+    });
+
+    app.on_select_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_structure_selected_layer_id(id);
+                refresh_structure_ui(&app);
+            }
+        }
+    });
+
+    app.on_move_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id, dx, dy| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    return;
+                }
+                // Ignore tiny jitter to avoid model thrash
+                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    return;
+                }
+                let path = structure_path_for(&vid);
+                let mut doc =
+                    match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
+                    {
+                        Ok(d) => d,
+                        Err(_) => return,
+                    };
+                if doc.move_layer(id.as_str(), dx, dy).is_err() {
+                    return;
+                }
+                // Persist immediately for Phase movement; explicit Save still validates.
+                if yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc)
+                    .is_ok()
+                {
+                    app.set_structure_selected_layer_id(id);
+                    refresh_structure_ui(&app);
+                }
+            }
+        }
+    });
+
+    app.on_resize_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id, handle, dx, dy| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    return;
+                }
+                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    return;
+                }
+                let path = structure_path_for(&vid);
+                let mut doc =
+                    match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
+                    {
+                        Ok(d) => d,
+                        Err(_) => return,
+                    };
+                if doc
+                    .resize_with_handle(id.as_str(), handle.as_str(), dx, dy)
+                    .is_err()
+                {
+                    return;
+                }
+                if yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc)
+                    .is_ok()
+                {
+                    app.set_structure_selected_layer_id(id);
+                    refresh_structure_ui(&app);
+                }
+            }
+        }
+    });
+
+    app.on_toggle_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let id_s = id.to_string();
+                with_structure_doc(&app, |doc| doc.toggle_layer(&id_s));
+            }
+        }
+    });
+
+    app.on_delete_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let id_s = id.to_string();
+                with_structure_doc(&app, |doc| doc.delete_layer(&id_s));
+                if app.get_structure_selected_layer_id().as_str() == id.as_str() {
+                    app.set_structure_selected_layer_id("".into());
+                    refresh_structure_ui(&app);
+                }
+            }
+        }
+    });
+
+    app.on_raise_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let id_s = id.to_string();
+                with_structure_doc(&app, |doc| doc.raise_layer(&id_s));
+            }
+        }
+    });
+
+    app.on_lower_structure_layer({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let id_s = id.to_string();
+                with_structure_doc(&app, |doc| doc.lower_layer(&id_s));
+            }
+        }
+    });
+
+    app.on_commit_structure_position({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let id: String = app.get_structure_selected_layer_id().into();
+                let x: f32 = app
+                    .get_structure_inspector_x()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(f32::NAN);
+                let y: f32 = app
+                    .get_structure_inspector_y()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(f32::NAN);
+                if !x.is_finite() || !y.is_finite() {
+                    app.set_structure_status(format!("{}: invalid position", t!("error")).into());
+                    return;
+                }
+                with_structure_doc(&app, |doc| {
+                    let (cx, cy, w, h) = doc
+                        .layers
+                        .iter()
+                        .find(|l| l.id == id)
+                        .map(|l| {
+                            let (rx, ry, rw, rh) = l.resolved_rect();
+                            (rx as f32, ry as f32, rw as f32, rh as f32)
+                        })
+                        .ok_or_else(|| format!("layer '{id}' not found"))?;
+                    let _ = (cx, cy);
+                    doc.resize_layer(&id, x, y, w, h)
+                });
+            }
+        }
+    });
+
+    app.on_commit_structure_size({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let id: String = app.get_structure_selected_layer_id().into();
+                let w: f32 = app
+                    .get_structure_inspector_w()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(f32::NAN);
+                let h: f32 = app
+                    .get_structure_inspector_h()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(f32::NAN);
+                if !w.is_finite() || !h.is_finite() {
+                    app.set_structure_status(format!("{}: invalid size", t!("error")).into());
+                    return;
+                }
+                with_structure_doc(&app, |doc| {
+                    let (cx, cy, _, _) = doc
+                        .layers
+                        .iter()
+                        .find(|l| l.id == id)
+                        .map(|l| {
+                            let (rx, ry, rw, rh) = l.resolved_rect();
+                            (rx as f32, ry as f32, rw as f32, rh as f32)
+                        })
+                        .ok_or_else(|| format!("layer '{id}' not found"))?;
+                    doc.resize_layer(&id, cx, cy, w, h)
+                });
+            }
+        }
+    });
+
+    app.on_add_structure_clip({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                with_structure_doc(&app, |doc| {
+                    let n = doc.layers.len();
+                    use yt_shortmaker_core::plano::schema::{
+                        Fit, PlanoLayer, PlanoObject, Position, PositionValue, SizeValue,
+                    };
+                    doc.layers.push(PlanoLayer {
+                        id: format!("clip-{}", n + 1),
+                        name: format!("Clip {}", n + 1),
+                        visible: true,
+                        object: PlanoObject::Clip {
+                            position: Position {
+                                x: PositionValue::Pixels(0),
+                                y: PositionValue::Pixels(0),
+                                width: SizeValue::Pixels(1080),
+                                height: SizeValue::Pixels(1920),
+                            },
+                            crop: None,
+                            fit: Fit::Cover,
+                            comment: None,
+                        },
+                    });
+                    Ok(())
+                });
+            }
+        }
+    });
+
+    app.on_add_structure_blur({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                with_structure_doc(&app, |doc| {
+                    let n = doc.layers.len();
+                    use yt_shortmaker_core::plano::schema::{
+                        PlanoLayer, PlanoObject, Position, PositionValue, ShaderEffect, SizeValue,
+                    };
+                    doc.layers.push(PlanoLayer {
+                        id: format!("blur-{}", n + 1),
+                        name: format!("Blur {}", n + 1),
+                        visible: true,
+                        object: PlanoObject::Shader {
+                            effect: ShaderEffect::Blur { intensity: 20 },
+                            position: Position {
+                                x: PositionValue::Pixels(0),
+                                y: PositionValue::Pixels(0),
+                                width: SizeValue::Keyword("full".to_string()),
+                                height: SizeValue::Keyword("full".to_string()),
+                            },
+                            comment: None,
+                        },
+                    });
+                    Ok(())
+                });
+            }
+        }
+    });
+
+    app.on_add_structure_image({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let picked = rfd::FileDialog::new()
+                    .add_filter("image", &["png", "jpg", "jpeg"])
+                    .pick_file();
+                let src = match picked {
+                    Some(p) => p,
+                    None => return,
+                };
+                let ext = src
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if ext != "png" && ext != "jpg" && ext != "jpeg" {
+                    app.set_structure_status(format!("{}: PNG/JPG only", t!("error")).into());
+                    return;
+                }
+                let assets = work_dir_for(&vid).join("assets");
+                if std::fs::create_dir_all(&assets).is_err() {
+                    app.set_structure_status(format!("{}: assets dir", t!("error")).into());
+                    return;
+                }
+                let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+                let safe = yt_shortmaker_core::util::sanitize_id(&format!("{stem}.{ext}"));
+                let dst = assets.join(format!(
+                    "{}_{safe}",
+                    yt_shortmaker_core::util::fnv1a_hash(&src.to_string_lossy())
+                ));
+                if std::fs::copy(&src, &dst).is_err() {
+                    app.set_structure_status(format!("{}: copy failed", t!("error")).into());
+                    return;
+                }
+                let dst_s = dst.to_string_lossy().to_string();
+                with_structure_doc(&app, |doc| {
+                    let n = doc.layers.len();
+                    use yt_shortmaker_core::plano::schema::{
+                        PlanoLayer, PlanoObject, Position, PositionValue, SizeValue,
+                    };
+                    doc.layers.push(PlanoLayer {
+                        id: format!("img-{}", n + 1),
+                        name: format!("Image {}", n + 1),
+                        visible: true,
+                        object: PlanoObject::Image {
+                            path: dst_s.clone(),
+                            position: Position {
+                                x: PositionValue::Pixels(140),
+                                y: PositionValue::Pixels(140),
+                                width: SizeValue::Pixels(800),
+                                height: SizeValue::Pixels(500),
+                            },
+                            opacity: 1.0,
+                            comment: None,
+                        },
+                    });
+                    Ok(())
+                });
+            }
+        }
+    });
+
+    app.on_add_structure_video({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let picked = rfd::FileDialog::new()
+                    .add_filter("video", &["mp4", "webm"])
+                    .pick_file();
+                let src = match picked {
+                    Some(p) => p,
+                    None => return,
+                };
+                let ext = src
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if ext != "mp4" && ext != "webm" {
+                    app.set_structure_status(format!("{}: MP4/WebM only", t!("error")).into());
+                    return;
+                }
+                let assets = work_dir_for(&vid).join("assets");
+                if std::fs::create_dir_all(&assets).is_err() {
+                    app.set_structure_status(format!("{}: assets dir", t!("error")).into());
+                    return;
+                }
+                let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
+                let safe = yt_shortmaker_core::util::sanitize_id(&format!("{stem}.{ext}"));
+                let dst = assets.join(format!(
+                    "{}_{safe}",
+                    yt_shortmaker_core::util::fnv1a_hash(&src.to_string_lossy())
+                ));
+                if std::fs::copy(&src, &dst).is_err() {
+                    app.set_structure_status(format!("{}: copy failed", t!("error")).into());
+                    return;
+                }
+                let dst_s = dst.to_string_lossy().to_string();
+                with_structure_doc(&app, |doc| {
+                    let n = doc.layers.len();
+                    use yt_shortmaker_core::plano::schema::{
+                        Fit, PlanoLayer, PlanoObject, Position, PositionValue, SizeValue,
+                    };
+                    doc.layers.push(PlanoLayer {
+                        id: format!("vid-{n}"),
+                        name: format!("Video {}", n + 1),
+                        visible: true,
+                        object: PlanoObject::Video {
+                            path: dst_s.clone(),
+                            position: Position {
+                                x: PositionValue::Pixels(140),
+                                y: PositionValue::Pixels(800),
+                                width: SizeValue::Pixels(800),
+                                height: SizeValue::Pixels(500),
+                            },
+                            loop_video: true,
+                            keep_last_frame: false,
+                            opacity: 1.0,
+                            fit: Fit::Cover,
+                            comment: None,
+                        },
+                    });
+                    Ok(())
+                });
+            }
+        }
+    });
+
+    app.on_render_structure_preview({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                if app.get_structure_preview_rendering() {
+                    return;
+                }
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    app.set_structure_preview_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let second: u64 = app
+                    .get_structure_preview_second()
+                    .to_string()
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+                let video_path = match resolve_active_video_path(&app) {
+                    Some(p) => p,
+                    None => {
+                        app.set_structure_preview_status(
+                            format!("{}: video file missing", t!("error")).into(),
+                        );
+                        return;
+                    }
+                };
+                let struct_path = structure_path_for(&vid);
+                let out_path = work_dir_for(&vid).join("preview_frame.png");
+                app.set_structure_preview_rendering(true);
+                app.set_structure_preview_status("Rendering frame...".into());
+                let weak = app.as_weak();
+                std::thread::spawn(move || {
+                    let res: anyhow::Result<std::path::PathBuf> = (|| {
+                        let doc = yt_shortmaker_core::plano::schema::load_document(
+                            &struct_path.to_string_lossy(),
+                        )?;
+                        let cmd = yt_shortmaker_core::plano::export::build_frame_command(
+                            &video_path,
+                            &doc,
+                            second,
+                            &out_path,
+                        )?;
+                        yt_shortmaker_core::plano::export::run_render(&cmd)?;
+                        Ok(out_path.clone())
+                    })();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(a) = weak.upgrade() {
+                            a.set_structure_preview_rendering(false);
+                            match res {
+                                Ok(p) => match slint::Image::load_from_path(&p) {
+                                    Ok(img) => {
+                                        a.set_structure_preview_image(img);
+                                        a.set_structure_preview_has_frame(true);
+                                        a.set_structure_preview_status(
+                                            format!("Frame: {second}s").into(),
+                                        );
+                                    }
+                                    Err(e) => a.set_structure_preview_status(
+                                        format!("{}: {e}", t!("error")).into(),
+                                    ),
+                                },
+                                Err(e) => a.set_structure_preview_status(
+                                    format!("{}: {e:#}", t!("error")).into(),
+                                ),
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    });
+
+    app.on_render_structure_sample({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                if app.get_structure_preview_rendering() {
+                    return;
+                }
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    app.set_structure_preview_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let second: u64 = app
+                    .get_structure_preview_second()
+                    .to_string()
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+                let video_path = match resolve_active_video_path(&app) {
+                    Some(p) => p,
+                    None => {
+                        app.set_structure_preview_status(
+                            format!("{}: video file missing", t!("error")).into(),
+                        );
+                        return;
+                    }
+                };
+                let struct_path = structure_path_for(&vid);
+                let out_path = work_dir_for(&vid).join("preview_sample.mp4");
+                app.set_structure_preview_rendering(true);
+                app.set_structure_preview_status("Rendering 4s sample...".into());
+                let weak = app.as_weak();
+                std::thread::spawn(move || {
+                    let res: anyhow::Result<std::path::PathBuf> = (|| {
+                        let doc = yt_shortmaker_core::plano::schema::load_document(
+                            &struct_path.to_string_lossy(),
+                        )?;
+                        let profile = yt_shortmaker_core::plano::export::ExportProfile::high_1080();
+                        let cmd = yt_shortmaker_core::plano::export::build_sample_command(
+                            &video_path,
+                            &doc,
+                            second,
+                            yt_shortmaker_core::plano::export::SAMPLE_DURATION_SECS,
+                            &profile,
+                            &out_path,
+                        )?;
+                        yt_shortmaker_core::plano::export::run_render(&cmd)?;
+                        Ok(out_path.clone())
+                    })();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(a) = weak.upgrade() {
+                            a.set_structure_preview_rendering(false);
+                            match res {
+                                Ok(p) => a.set_structure_preview_status(
+                                    format!("Sample ready: {}", p.display()).into(),
+                                ),
+                                Err(e) => a.set_structure_preview_status(
+                                    format!("{}: {e:#}", t!("error")).into(),
+                                ),
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    });
+
+    app.on_save_structure({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let path = structure_path_for(&vid);
+                let doc = if path.exists() {
+                    match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            app.set_structure_status(format!("{}: {e}", t!("error")).into());
+                            return;
+                        }
+                    }
+                } else {
+                    yt_shortmaker_core::plano::schema::create_empty_document()
+                };
+                match yt_shortmaker_core::plano::schema::save_document(
+                    &path.to_string_lossy(),
+                    &doc,
+                ) {
+                    Ok(()) => {
+                        app.set_structure_has_video(true);
+                        app.set_structure_status(t!("structure_status_saved").to_string().into());
+                    }
+                    Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+                }
+            }
+        }
+    });
+
+    app.on_save_global_template({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let src = structure_path_for(&vid);
+                if !src.exists() {
+                    app.set_structure_status(
+                        t!("structure_status_empty_invalid").to_string().into(),
+                    );
+                    return;
+                }
+                let doc = match yt_shortmaker_core::plano::schema::load_document(
+                    &src.to_string_lossy(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        app.set_structure_status(format!("{}: {e}", t!("error")).into());
+                        return;
+                    }
+                };
+                match global_template_path() {
+                    Some(dst) => {
+                        match yt_shortmaker_core::plano::schema::save_document(
+                            &dst.to_string_lossy(),
+                            &doc,
+                        ) {
+                            Ok(()) => app.set_structure_status(
+                                t!("structure_status_saved").to_string().into(),
+                            ),
+                            Err(e) => {
+                                app.set_structure_status(format!("{}: {e}", t!("error")).into())
+                            }
+                        }
+                    }
+                    None => app.set_structure_status(format!("{}: config dir", t!("error")).into()),
+                }
+            }
+        }
+    });
+
+    app.on_restore_global_template({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let src = match global_template_path() {
+                    Some(p) => p,
+                    None => {
+                        app.set_structure_status(format!("{}: config dir", t!("error")).into());
+                        return;
+                    }
+                };
+                if !src.exists() {
+                    app.set_structure_status(
+                        t!("structure_status_empty_invalid").to_string().into(),
+                    );
+                    return;
+                }
+                let doc = match yt_shortmaker_core::plano::schema::load_document(
+                    &src.to_string_lossy(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        app.set_structure_status(format!("{}: {e}", t!("error")).into());
+                        return;
+                    }
+                };
+                let dst = structure_path_for(&vid);
+                match yt_shortmaker_core::plano::schema::save_document(&dst.to_string_lossy(), &doc)
+                {
+                    Ok(()) => {
+                        app.set_structure_status(t!("structure_status_saved").to_string().into())
+                    }
+                    Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+                }
+            }
+        }
+    });
+
+    app.on_load_structure_preset({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                let vid: String = app.get_structure_selected_video_id().into();
+                let vid = if vid.trim().is_empty() {
+                    app.get_video_id().to_string()
+                } else {
+                    vid
+                };
+                if vid.trim().is_empty() {
+                    app.set_structure_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                let doc = yt_shortmaker_core::plano::schema::create_default_document();
+                let dst = structure_path_for(&vid);
+                match yt_shortmaker_core::plano::schema::save_document(&dst.to_string_lossy(), &doc)
+                {
+                    Ok(()) => {
+                        app.set_structure_has_video(true);
+                        app.set_structure_status(t!("structure_status_saved").to_string().into());
+                        refresh_structure_ui(&app);
+                    }
+                    Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+                }
+            }
+        }
+    });
+
+    app.on_toggle_structure_moment({
+        let app_weak = app_weak.clone();
+        move |idx| {
+            if let Some(app) = app_weak.upgrade() {
+                use slint::Model;
+                let model = app.get_structure_moments_model();
+                if let Some(vm) = model.as_any().downcast_ref::<slint::VecModel<MomentRow>>() {
+                    let i = idx as usize;
+                    if let Some(mut row) = vm.row_data(i) {
+                        row.selected = !row.selected;
+                        vm.set_row_data(i, row);
+                    }
+                }
+            }
+        }
+    });
+
+    app.on_cancel_structure_export({
+        let app_weak = app_weak.clone();
+        move || {
+            export_cancel_flag().store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(app) = app_weak.upgrade() {
+                app.set_structure_export_status("Cancelling...".into());
+            }
+        }
+    });
+
+    app.on_retry_structure_export({
+        let app_weak = app_weak.clone();
+        move || {
+            if let Some(app) = app_weak.upgrade() {
+                use slint::Model;
+                let model = app.get_structure_moments_model();
+                if let Some(vm) = model.as_any().downcast_ref::<slint::VecModel<MomentRow>>() {
+                    for i in 0..vm.row_count() {
+                        if let Some(mut row) = vm.row_data(i) {
+                            if row.export_status.as_str() == "failed"
+                                || row.export_status.as_str() == "cancelled"
+                            {
+                                row.selected = true;
+                                row.export_status = "pending".into();
+                                vm.set_row_data(i, row);
+                            }
+                        }
+                    }
+                }
+                app.set_structure_export_status("Retrying failed...".into());
+            }
+        }
+    });
+
+    {
+        let app_weak = app_weak.clone();
+        let config_rc = config_rc.clone();
+        app.on_start_structure_export(move || {
+            if let Some(app) = app_weak.upgrade() {
+                if app.get_structure_export_running() {
+                    return;
+                }
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    app.set_structure_export_status(t!("structure_no_video").to_string().into());
+                    return;
+                }
+                use slint::Model;
+                let selected: Vec<(i32, String, String)> = app
+                    .get_structure_moments_model()
+                    .iter()
+                    .filter(|r| r.selected)
+                    .map(|r| (r.index, r.start.to_string(), r.end.to_string()))
+                    .collect();
+                if selected.is_empty() {
+                    app.set_structure_export_status("Select at least one moment.".into());
+                    return;
+                }
+                let resolution: String = app.get_structure_export_resolution().into();
+                let fps: u32 = app
+                    .get_structure_export_fps()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(30);
+                let profile = if resolution == "720x1280" {
+                    yt_shortmaker_core::plano::export::ExportProfile::high_720().with_fps(fps)
+                } else {
+                    yt_shortmaker_core::plano::export::ExportProfile::high_1080().with_fps(fps)
+                };
+                let video_path = match resolve_active_video_path(&app) {
+                    Some(p) => p,
+                    None => {
+                        app.set_structure_export_status(
+                            format!("{}: video file missing", t!("error")).into(),
+                        );
+                        return;
+                    }
+                };
+                let struct_path = structure_path_for(&vid);
+                let doc = match yt_shortmaker_core::plano::schema::load_document(
+                    &struct_path.to_string_lossy(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        app.set_structure_export_status(format!("{}: {e:#}", t!("error")).into());
+                        return;
+                    }
+                };
+                if doc.validate_for_export().is_err() {
+                    app.set_structure_export_status(
+                        t!("structure_status_empty_invalid").to_string().into(),
+                    );
+                    return;
+                }
+                let out_base = {
+                    let cfg = config_rc.borrow();
+                    cfg.output_dir
+                        .clone()
+                        .unwrap_or_else(|| "output".to_string())
+                };
+                let slug = yt_shortmaker_core::util::slugify(&vid);
+                let shorts_dir = std::path::PathBuf::from(&out_base)
+                    .join(slug)
+                    .join("shorts");
+                let _ = std::fs::create_dir_all(&shorts_dir);
+                let total = selected.len() as i32;
+                app.set_structure_export_running(true);
+                app.set_structure_export_total(total);
+                app.set_structure_export_completed(0);
+                app.set_structure_export_status(format!("Exporting 0/{total}...").into());
+                export_cancel_flag().store(false, std::sync::atomic::Ordering::SeqCst);
+                let cancel = export_cancel_flag();
+                let weak = app.as_weak();
+                let profile_hash = profile.hash();
+                let struct_hash = yt_shortmaker_core::plano::export::structure_hash(&doc);
+                std::thread::spawn(move || {
+                    for (done_idx, (idx, start_s, end_s)) in selected.into_iter().enumerate() {
+                        let done = (done_idx + 1) as i32;
+                        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = slint::invoke_from_event_loop({
+                                let weak = weak.clone();
+                                move || {
+                                    if let Some(a) = weak.upgrade() {
+                                        a.set_structure_export_running(false);
+                                        a.set_structure_export_status("Cancelled.".into());
+                                        refresh_structure_moments(&a, &vid);
+                                    }
+                                }
+                            });
+                            return;
+                        }
+                        let start = yt_shortmaker_core::types::parse_timestamp_to_seconds(&start_s)
+                            .unwrap_or(0);
+                        let end = yt_shortmaker_core::types::parse_timestamp_to_seconds(&end_s)
+                            .unwrap_or(start);
+                        let out_path = shorts_dir.join(format!("short_{:03}.mp4", idx + 1));
+                        // Skip valid completed output with matching fingerprints.
+                        let skip = (|| {
+                            let db = session::db_path().ok()?;
+                            let conn = session::init_db(&db).ok()?;
+                            let recs = session::get_exports(&conn, &vid).ok()?;
+                            let r = recs.iter().find(|x| x.moment_idx as i32 == idx)?;
+                            if r.status == "completed"
+                                && r.structure_hash == struct_hash
+                                && r.profile_hash == profile_hash
+                                && std::path::Path::new(&r.output_path).exists()
+                            {
+                                return Some(true);
+                            }
+                            None
+                        })()
+                        .unwrap_or(false);
+                        if !skip {
+                            let tmp = shorts_dir.join(format!("short_{:03}.tmp.mp4", idx + 1));
+                            let cmd = yt_shortmaker_core::plano::export::build_moment_command(
+                                &video_path,
+                                &doc,
+                                start,
+                                end,
+                                &profile,
+                                &tmp,
+                            );
+                            let result: anyhow::Result<()> = (|| {
+                                let c = cmd?;
+                                yt_shortmaker_core::plano::export::run_render(&c)?;
+                                std::fs::rename(&tmp, &out_path)?;
+                                if let Ok(db) = session::db_path() {
+                                    if let Ok(conn) = session::init_db(&db) {
+                                        let _ = session::upsert_export(
+                                            &conn,
+                                            &session::ExportRecord {
+                                                video_id: vid.clone(),
+                                                moment_idx: idx as i64,
+                                                output_path: out_path.to_string_lossy().to_string(),
+                                                status: "completed".to_string(),
+                                                error: None,
+                                                structure_hash: struct_hash.clone(),
+                                                profile_hash: profile_hash.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                                Ok(())
+                            })();
+                            if let Err(e) = result {
+                                if let Ok(db) = session::db_path() {
+                                    if let Ok(conn) = session::init_db(&db) {
+                                        let _ = session::upsert_export(
+                                            &conn,
+                                            &session::ExportRecord {
+                                                video_id: vid.clone(),
+                                                moment_idx: idx as i64,
+                                                output_path: out_path.to_string_lossy().to_string(),
+                                                status: "failed".to_string(),
+                                                error: Some(format!("{e:#}")),
+                                                structure_hash: struct_hash.clone(),
+                                                profile_hash: profile_hash.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let weak2 = weak.clone();
+                        let vid2 = vid.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(a) = weak2.upgrade() {
+                                a.set_structure_export_completed(done);
+                                a.set_structure_export_status(
+                                    format!("Exporting {done}/{total}...").into(),
+                                );
+                                refresh_structure_moments(&a, &vid2);
+                            }
+                        });
+                    }
+                    // Write moments.json/txt alongside shorts.
+                    if let Ok(db) = session::db_path() {
+                        if let Ok(conn) = session::init_db(&db) {
+                            if let Ok(moments) = session::get_job_moments(&conn, &vid) {
+                                let json =
+                                    serde_json::to_string_pretty(&moments).unwrap_or_default();
+                                let base = shorts_dir.parent().unwrap_or(&shorts_dir).to_path_buf();
+                                let _ = std::fs::write(base.join("moments.json"), json);
+                                let txt = moments
+                                    .iter()
+                                    .map(|m| {
+                                        format!(
+                                            "{} - {} [{}] {}",
+                                            m.start_time, m.end_time, m.category, m.description
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let _ = std::fs::write(base.join("moments.txt"), txt);
+                            }
+                        }
+                    }
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(a) = weak.upgrade() {
+                            a.set_structure_export_running(false);
+                            a.set_structure_export_status("Export complete.".into());
+                            refresh_structure_moments(&a, &vid);
+                        }
+                    });
+                });
+            }
+        });
+    }
 
     app.run()?;
     Ok(())

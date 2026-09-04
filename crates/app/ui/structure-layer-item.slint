@@ -1,0 +1,134 @@
+// Canvas layer item with selection, movement and resize handles.
+// TouchArea.moved() has no args: deltas come from mouse-x/pressed-x.
+
+import { CanvasLayer } from "./structure-types.slint";
+
+export component ResizeHandle inherits Rectangle {
+    in property <string> handle: "bottom-right";
+    in property <float> zoom: 0.3;
+
+    callback handle-dragged(float, float);
+
+    property <float> last-dx: 0;
+    property <float> last-dy: 0;
+
+    width: 12px;
+    height: 12px;
+    background: #6366f1;
+    border-width: 1px;
+    border-color: #ffffff;
+
+    drag := TouchArea {
+        mouse-cursor: MouseCursor.nwse-resize;
+        changed pressed => {
+            if (!self.pressed) {
+                root.last-dx = 0;
+                root.last-dy = 0;
+            }
+        }
+        moved => {
+            // Incremental to keep Rust additive correct
+            root.handle-dragged(
+                (self.mouse-x - self.pressed-x) / root.zoom / 1px - root.last-dx,
+                (self.mouse-y - self.pressed-y) / root.zoom / 1px - root.last-dy
+            );
+            root.last-dx = (self.mouse-x - self.pressed-x) / root.zoom / 1px;
+            root.last-dy = (self.mouse-y - self.pressed-y) / root.zoom / 1px;
+        }
+    }
+}
+
+export component CanvasLayerItem inherits Rectangle {
+    in property <string> layer-id;
+    in property <string> layer-type: "clip";
+    in property <float> layer-x;
+    in property <float> layer-y;
+    in property <float> layer-width;
+    in property <float> layer-height;
+    in property <bool> selected;
+    in property <bool> layer-visible: true;
+    in property <float> zoom: 0.3;
+
+    callback selected-layer();
+    callback dragged(float, float);
+    callback handle-dragged(string, float, float);
+
+    property <float> last-dx: 0;
+    property <float> last-dy: 0;
+
+    x: layer-x * root.zoom * 1px;
+    y: layer-y * root.zoom * 1px;
+    width: layer-width * root.zoom * 1px;
+    height: layer-height * root.zoom * 1px;
+    visible: root.layer-visible;
+    background: layer-type == "shader" ? #2a2a2e : #252629;
+    border-width: 1px;
+    border-color: root.selected ? #6366f1 : #3a3c42;
+    clip: true;
+
+    Text {
+        x: 4px;
+        y: 4px;
+        text: root.layer-type;
+        color: #a1a1aa;
+        font-size: 9px;
+    }
+
+    move-area := TouchArea {
+        mouse-cursor: MouseCursor.move;
+        clicked => { root.selected-layer(); }
+        changed pressed => {
+            if (!self.pressed) {
+                root.last-dx = 0;
+                root.last-dy = 0;
+            }
+        }
+        moved => {
+            root.dragged(
+                (self.mouse-x - self.pressed-x) / root.zoom / 1px - root.last-dx,
+                (self.mouse-y - self.pressed-y) / root.zoom / 1px - root.last-dy
+            );
+            root.last-dx = (self.mouse-x - self.pressed-x) / root.zoom / 1px;
+            root.last-dy = (self.mouse-y - self.pressed-y) / root.zoom / 1px;
+        }
+    }
+
+    if root.selected: ResizeHandle {
+        handle: "top-left";
+        zoom: root.zoom;
+        x: 0px;
+        y: 0px;
+        handle-dragged(dx, dy) => { root.handle-dragged("top-left", dx, dy); }
+    }
+    if root.selected: ResizeHandle {
+        handle: "top-right";
+        zoom: root.zoom;
+        x: parent.width - 12px;
+        y: 0px;
+        handle-dragged(dx, dy) => { root.handle-dragged("top-right", dx, dy); }
+    }
+    if root.selected: ResizeHandle {
+        handle: "bottom-left";
+        zoom: root.zoom;
+        x: 0px;
+        y: parent.height - 12px;
+        handle-dragged(dx, dy) => { root.handle-dragged("bottom-left", dx, dy); }
+    }
+    if root.selected: ResizeHandle {
+        handle: "bottom-right";
+        zoom: root.zoom;
+        x: parent.width - 12px;
+        y: parent.height - 12px;
+        handle-dragged(dx, dy) => { root.handle-dragged("bottom-right", dx, dy); }
+    }
+
+    if root.selected: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        border-width: 1px;
+        border-color: #6366f1;
+        background: transparent;
+    }
+}
