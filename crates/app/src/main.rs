@@ -591,6 +591,73 @@ fn preview_structure_doc_to_ui(
     app.set_structure_document_dirty(true);
 }
 
+// Image cache: decoding thumbnails/assets from disk on every mouse delta
+// blocked the Slint event loop and made drags freeze. Images are immutable
+// during a drag (only geometry changes), so cache them by path.
+// Thread-local because `slint::Image` is not Send/Sync and all access happens
+// on the Slint main thread.
+thread_local! {
+    static IMAGE_CACHE: std::cell::RefCell<std::collections::HashMap<String, slint::Image>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn cached_image_for_path(path: &std::path::Path) -> slint::Image {
+    let key = path.to_string_lossy().to_string();
+    if let Some(img) = IMAGE_CACHE.with(|m| m.borrow().get(&key).cloned()) {
+        return img;
+    }
+    let img = slint::Image::load_from_path(path).unwrap_or_default();
+    IMAGE_CACHE.with(|m| {
+        m.borrow_mut().insert(key, img.clone());
+    });
+    img
+}
+
+/// Fast drag preview: updates only the dragged row in place instead of
+/// rebuilding both models and re-decoding images. Replacing the whole
+/// `VecModel` mid-gesture destroys the active `TouchArea`, which is why the
+/// layer moved a few px and then stopped following the cursor.
+/// Returns true when the in-place update succeeded.
+fn preview_drag_to_ui(
+    app: &MainWindow,
+    doc: &yt_shortmaker_core::plano::schema::PlanoDocument,
+    changed_id: &str,
+) -> bool {
+    let selected: String = app.get_structure_selected_layer_id().into();
+    let layer = match doc.layers.iter().find(|l| l.id == changed_id) {
+        Some(l) => l,
+        None => return false,
+    };
+    let (x, y, w, h) = layer.resolved_rect();
+    let model = app.get_structure_canvas_layers();
+    let mut index: Option<usize> = None;
+    let mut reuse: Option<CanvasLayer> = None;
+    for (i, row) in model.iter().enumerate() {
+        let id: String = row.id.clone().into();
+        if id == changed_id {
+            index = Some(i);
+            reuse = Some(row);
+            break;
+        }
+    }
+    let (i, mut row) = match (index, reuse) {
+        (Some(i), Some(row)) => (i, row),
+        _ => return false,
+    };
+    // Geometry only; keep the cached image handles untouched (no disk I/O).
+    row.x = x as f32;
+    row.y = y as f32;
+    row.width = w as f32;
+    row.height = h as f32;
+    row.selected = layer.id == selected;
+    if let Some(vec) = model.as_any().downcast_ref::<VecModel<CanvasLayer>>() {
+        vec.set_row_data(i, row);
+        app.set_structure_document_dirty(true);
+        return true;
+    }
+    false
+}
+
 fn finish_structure_gesture(app: &MainWindow, video_id: &str) {
     let doc = load_active_structure_doc(video_id);
     let before = structure_gesture_before()
@@ -714,13 +781,13 @@ fn document_to_canvas_layers(
                 preview_image: match &l.object {
                     yt_shortmaker_core::plano::schema::PlanoObject::Clip { .. } => {
                         session::cached_thumbnail_on_disk(video_id)
-                            .and_then(|path| slint::Image::load_from_path(&path).ok())
+                            .map(|path| cached_image_for_path(&path))
                             .unwrap_or_default()
                     }
                     yt_shortmaker_core::plano::schema::PlanoObject::Image { path, .. }
                         if std::path::Path::new(path).exists() =>
                     {
-                        slint::Image::load_from_path(std::path::Path::new(path)).unwrap_or_default()
+                        cached_image_for_path(std::path::Path::new(path))
                     }
                     _ => slint::Image::default(),
                 },
@@ -925,9 +992,11 @@ fn refresh_structure_ui(app: &MainWindow) {
     let available = refresh_structure_videos(app);
     let sel: String = app.get_structure_selected_video_id().into();
     let home: String = app.get_video_id().into();
-    let vid = if !sel.trim().is_empty() {
+    let sel_empty = sel.trim().is_empty();
+    let home_empty = home.trim().is_empty();
+    let vid = if !sel_empty {
         sel
-    } else if !home.trim().is_empty() {
+    } else if !home_empty {
         home
     } else if let Some(first) = available.first() {
         first.clone()
@@ -974,8 +1043,12 @@ fn refresh_structure_ui(app: &MainWindow) {
     }
     refresh_structure_assets(app, &vid);
     update_structure_history_flags(app);
-    // Keep videos-model selection in sync without rebuilding twice.
-    refresh_structure_videos(app);
+    // The videos model was built before resolving the fallback selection.
+    // Re-sync only when we fell back to the first available video so the
+    // common path (selection already set) avoids a second DB round-trip.
+    if sel_empty && home_empty {
+        refresh_structure_videos(app);
+    }
     let selected: String = app.get_structure_selected_layer_id().into();
     let path = structure_path_for(&vid);
     if path.exists() {
@@ -2360,13 +2433,17 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
                 // In-memory preview: no disk, no history, no full refresh.
+                // Fast path updates only the dragged row so the active
+                // TouchArea survives the gesture (no freeze, no flicker).
                 let mut doc = load_active_structure_doc(&vid);
                 if doc.move_layer(id.as_str(), dx, dy).is_err() {
                     return;
                 }
                 set_active_structure_doc(&vid, doc.clone());
-                app.set_structure_selected_layer_id(id);
-                preview_structure_doc_to_ui(&app, &vid, &doc);
+                app.set_structure_selected_layer_id(id.clone());
+                if !preview_drag_to_ui(&app, &doc, id.as_str()) {
+                    preview_structure_doc_to_ui(&app, &vid, &doc);
+                }
             }
         }
     });
@@ -2418,8 +2495,10 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
                 set_active_structure_doc(&vid, doc.clone());
-                app.set_structure_selected_layer_id(id);
-                preview_structure_doc_to_ui(&app, &vid, &doc);
+                app.set_structure_selected_layer_id(id.clone());
+                if !preview_drag_to_ui(&app, &doc, id.as_str()) {
+                    preview_structure_doc_to_ui(&app, &vid, &doc);
+                }
             }
         }
     });

@@ -25,10 +25,10 @@ export component StructureCanvas inherits Rectangle {
     in-out property <bool> space-held: false;
     property <bool> view-centered: false;
 
-    // Pan gesture state (screen px, incremental).
-    property <float> pan-last-dx: 0;
-    property <float> pan-last-dy: 0;
+    // Pan gesture state (screen px, incremental from pointer tracking).
     property <bool> pan-active: false;
+    property <float> pan-last-x: 0;
+    property <float> pan-last-y: 0;
 
     property <length> frame-w: root.output-width * root.zoom * 1px;
     property <length> frame-h: root.output-height * root.zoom * 1px;
@@ -36,6 +36,15 @@ export component StructureCanvas inherits Rectangle {
     property <length> world-h: Math.max(root.frame-h + 800px, scroll.visible-height + 400px);
     property <length> origin-x: (root.world-w - root.frame-w) / 2;
     property <length> origin-y: (root.world-h - root.frame-h) / 2;
+
+    // Grid: one cell per 100 logical px, scaled by zoom and anchored to the
+    // frame origin so cells stay aligned with the output frame at any zoom.
+    property <float> grid-logical-step: 100;
+    property <length> grid-step: Math.max(root.grid-logical-step * root.zoom * 1px, 1px);
+    property <int> grid-cols: Math.ceil(root.world-w / root.grid-step) + 3;
+    property <int> grid-rows: Math.ceil(root.world-h / root.grid-step) + 3;
+    property <length> grid-off-x: Math.mod(root.origin-x / 1px, root.grid-logical-step * root.zoom) * 1px;
+    property <length> grid-off-y: Math.mod(root.origin-y / 1px, root.grid-logical-step * root.zoom) * 1px;
 
     function apply-zoom(req-zoom: float) {
         let cz: float = req-zoom < 0.05 ? 0.05 : req-zoom > 2.0 ? 2.0 : req-zoom;
@@ -90,6 +99,22 @@ export component StructureCanvas inherits Rectangle {
         self.center-frame();
     }
 
+    public function start-pan(px: float, py: float) {
+        root.pan-active = true;
+        root.pan-last-x = px;
+        root.pan-last-y = py;
+        scope.focus();
+    }
+
+    public function apply-pan(dx: float, dy: float) {
+        root.view-x = root.view-x + dx * 1px;
+        root.view-y = root.view-y + dy * 1px;
+    }
+
+    public function end-pan() {
+        root.pan-active = false;
+    }
+
     changed selected-video-id => {
         root.view-centered = false;
         root.center-frame();
@@ -122,6 +147,9 @@ export component StructureCanvas inherits Rectangle {
             key-released(event) => {
                 if (event.text == " ") {
                     root.space-held = false;
+                    if (root.pan-active) {
+                        root.end-pan();
+                    }
                     return EventResult.accept;
                 }
                 return EventResult.reject;
@@ -142,14 +170,14 @@ export component StructureCanvas inherits Rectangle {
                     width: root.world-w;
                     height: root.world-h;
                     background: #101012;
-                    for col in 40: Rectangle {
-                        x: col * 100px;
+                    for col in root.grid-cols: Rectangle {
+                        x: root.grid-off-x - root.grid-step + col * root.grid-step;
                         width: 1px;
                         height: parent.height;
                         background: #1b1b1f;
                     }
-                    for row in 40: Rectangle {
-                        y: row * 100px;
+                    for row in root.grid-rows: Rectangle {
+                        y: root.grid-off-y - root.grid-step + row * root.grid-step;
                         width: parent.width;
                         height: 1px;
                         background: #1b1b1f;
@@ -162,22 +190,16 @@ export component StructureCanvas inherits Rectangle {
                         height: parent.height;
                         mouse-cursor: root.space-held ? MouseCursor.grab : MouseCursor.default;
                         pointer-event(event) => {
-                            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
-                                root.pan-active = true;
-                                root.pan-last-dx = 0;
-                                root.pan-last-dy = 0;
-                                scope.focus();
-                            } else if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                                scope.focus();
-                                if (root.space-held) {
-                                    root.pan-active = true;
-                                    root.pan-last-dx = 0;
-                                    root.pan-last-dy = 0;
+                            if (event.kind == PointerEventKind.down) {
+                                if (event.button == PointerEventButton.middle || (event.button == PointerEventButton.left && root.space-held)) {
+                                    root.start-pan(self.mouse-x / 1px, self.mouse-y / 1px);
+                                } else if (event.button == PointerEventButton.left) {
+                                    scope.focus();
                                 }
                             } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                                root.pan-active = false;
-                                root.pan-last-dx = 0;
-                                root.pan-last-dy = 0;
+                                if (root.pan-active) {
+                                    root.end-pan();
+                                }
                             }
                         }
                         scroll-event(event) => {
@@ -191,12 +213,16 @@ export component StructureCanvas inherits Rectangle {
                             }
                             return EventResult.reject;
                         }
+                        changed pressed => {
+                            if (!self.pressed && root.pan-active) {
+                                root.end-pan();
+                            }
+                        }
                         moved => {
-                            if (root.pan-active && self.pressed) {
-                                root.view-x = root.view-x + ((self.mouse-x - self.pressed-x) / 1px - root.pan-last-dx) * 1px;
-                                root.view-y = root.view-y + ((self.mouse-y - self.pressed-y) / 1px - root.pan-last-dy) * 1px;
-                                root.pan-last-dx = (self.mouse-x - self.pressed-x) / 1px;
-                                root.pan-last-dy = (self.mouse-y - self.pressed-y) / 1px;
+                            if (root.pan-active) {
+                                root.apply-pan(self.mouse-x / 1px - root.pan-last-x, self.mouse-y / 1px - root.pan-last-y);
+                                root.pan-last-x = self.mouse-x / 1px;
+                                root.pan-last-y = self.mouse-y / 1px;
                             }
                         }
                     }
@@ -222,6 +248,9 @@ export component StructureCanvas inherits Rectangle {
                         resize-started(id) => { root.resize-start(id); }
                         handle-dragged(handle, dx, dy) => { root.resize-layer(layer.id, handle, dx, dy); }
                         resize-ended(id) => { root.resize-finish(id); }
+                        pan-started => { root.pan-active = true; scope.focus(); }
+                        pan-moved(dx, dy) => { root.apply-pan(dx, dy); }
+                        pan-ended => { root.end-pan(); }
                         wheel-zoom-in => { root.request-zoom-in(); }
                         wheel-zoom-out => { root.request-zoom-out(); }
                     }

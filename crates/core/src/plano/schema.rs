@@ -771,6 +771,29 @@ pub fn clamp_zoom(z: f32) -> f32 {
     z.clamp(0.05, 2.0)
 }
 
+/// Logical grid step scaled by zoom (screen px per grid cell).
+/// Keeps the grid visually consistent: zooming out shrinks cells, zooming in grows them.
+pub fn grid_step_for(zoom: f32, logical_step: f32) -> f32 {
+    (logical_step * clamp_zoom(zoom)).max(1.0)
+}
+
+/// Grid origin offset so cells stay aligned with the logical frame origin.
+/// Returns a value in `0..step` that anchors cell `k` to `origin + k * step`.
+pub fn grid_offset_for(origin: f32, step: f32) -> f32 {
+    if !step.is_finite() || step <= 0.0 {
+        return 0.0;
+    }
+    origin - (origin / step).floor() * step
+}
+
+/// Number of grid lines needed to cover `world` px with `step` px cells (plus margin).
+pub fn grid_count_for(world: f32, step: f32) -> u32 {
+    if !step.is_finite() || step <= 0.0 || !world.is_finite() || world <= 0.0 {
+        return 0;
+    }
+    (world / step).ceil() as u32 + 3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,5 +875,29 @@ mod tests {
         assert_eq!(y1, y0 + 10);
         // One undo entry restores everything (before != after, single clone).
         assert_ne!(before, doc);
+    }
+
+    #[test]
+    fn test_grid_scales_with_zoom_and_stays_aligned() {
+        // Step shrinks when zooming out and grows when zooming in.
+        let near = grid_step_for(0.1, 100.0);
+        let mid = grid_step_for(0.3, 100.0);
+        let far = grid_step_for(1.0, 100.0);
+        assert!(near < mid && mid < far);
+        assert!((mid - 30.0).abs() < 0.001);
+        // Offset keeps logical multiples on grid lines: origin + k*step - offset is a multiple of step.
+        for origin in [0.0, 37.0, 213.5, 1024.0] {
+            let step = grid_step_for(0.3, 100.0);
+            let off = grid_offset_for(origin, step);
+            assert!(off >= 0.0 && off < step);
+            for k in 0..4 {
+                let aligned = origin + k as f32 * step - off;
+                assert!((aligned / step).round() * step - aligned < 0.01);
+            }
+        }
+        // Count covers the world plus margin and degrades gracefully.
+        assert_eq!(grid_count_for(1000.0, 0.0), 0);
+        assert_eq!(grid_count_for(1000.0, 30.0), 34 + 3);
+        assert!(grid_count_for(400.0, 5.0) > grid_count_for(400.0, 200.0));
     }
 }

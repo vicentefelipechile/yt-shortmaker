@@ -1,20 +1,32 @@
 // Canvas layer item with selection, movement and resize handles.
-// TouchArea.moved() has no args: deltas come from mouse-x/pressed-x.
-// Left button moves/selects. Middle button and Space+drag are rejected so the
-// background pan area underneath can handle them.
+// TouchArea.moved() has no args: deltas come from mouse-x/mouse-y tracking.
+// Left button moves/selects. Middle button and Space+drag pan instead and are
+// forwarded so the canvas can move the viewport without fighting the layer.
 
 import { CanvasLayer } from "./structure-types.slint";
 
 export component ResizeHandle inherits Rectangle {
     in property <string> handle: "bottom-right";
     in property <float> zoom: 0.3;
+    in property <bool> space-held: false;
 
     callback handle-dragged(float, float);
     callback resize-started();
     callback resize-ended();
+    callback pan-started();
+    callback pan-moved(float, float);
+    callback pan-ended();
 
     property <float> last-dx: 0;
     property <float> last-dy: 0;
+    property <bool> pan-active: false;
+    property <float> pan-last-x: 0;
+    property <float> pan-last-y: 0;
+
+    function track-pointer() {
+        root.pan-last-x = drag.mouse-x / 1px;
+        root.pan-last-y = drag.mouse-y / 1px;
+    }
 
     width: 12px;
     height: 12px;
@@ -25,19 +37,38 @@ export component ResizeHandle inherits Rectangle {
     drag := TouchArea {
         mouse-cursor: MouseCursor.nwse-resize;
         pointer-event(event) => {
-            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                root.resize-started();
+            if (event.kind == PointerEventKind.down) {
+                if (event.button == PointerEventButton.middle || (event.button == PointerEventButton.left && root.space-held)) {
+                    root.pan-active = true;
+                    root.track-pointer();
+                    root.pan-started();
+                } else if (event.button == PointerEventButton.left && !root.space-held) {
+                    root.resize-started();
+                }
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                if (root.pan-active) {
+                    root.pan-active = false;
+                    root.pan-ended();
+                }
             }
         }
         changed pressed => {
             if (!self.pressed) {
                 root.last-dx = 0;
                 root.last-dy = 0;
-                root.resize-ended();
+                if (root.pan-active) {
+                    root.pan-active = false;
+                    root.pan-ended();
+                } else {
+                    root.resize-ended();
+                }
             }
         }
         moved => {
-            if (self.pressed) {
+            if (root.pan-active) {
+                root.pan-moved(self.mouse-x / 1px - root.pan-last-x, self.mouse-y / 1px - root.pan-last-y);
+                root.track-pointer();
+            } else if (self.pressed && !root.space-held) {
                 // Incremental to keep Rust additive correct
                 root.handle-dragged(
                     (self.mouse-x - self.pressed-x) / root.zoom / 1px - root.last-dx,
@@ -73,11 +104,22 @@ export component CanvasLayerItem inherits Rectangle {
     callback resize-started(string);
     callback handle-dragged(string, float, float);
     callback resize-ended(string);
+    callback pan-started();
+    callback pan-moved(float, float);
+    callback pan-ended();
     callback wheel-zoom-in();
     callback wheel-zoom-out();
 
     property <float> last-dx: 0;
     property <float> last-dy: 0;
+    property <bool> pan-active: false;
+    property <float> pan-last-x: 0;
+    property <float> pan-last-y: 0;
+
+    function track-pointer() {
+        root.pan-last-x = move-area.mouse-x / 1px;
+        root.pan-last-y = move-area.mouse-y / 1px;
+    }
 
     x: layer-x * root.zoom * 1px;
     y: layer-y * root.zoom * 1px;
@@ -114,11 +156,20 @@ export component CanvasLayerItem inherits Rectangle {
     }
 
     move-area := TouchArea {
-        mouse-cursor: MouseCursor.move;
+        mouse-cursor: root.space-held ? MouseCursor.grab : MouseCursor.move;
         pointer-event(event) => {
-            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                if (!root.space-held) {
+            if (event.kind == PointerEventKind.down) {
+                if (event.button == PointerEventButton.middle || (event.button == PointerEventButton.left && root.space-held)) {
+                    root.pan-active = true;
+                    root.track-pointer();
+                    root.pan-started();
+                } else if (event.button == PointerEventButton.left && !root.space-held) {
                     root.drag-started(root.layer-id);
+                }
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                if (root.pan-active) {
+                    root.pan-active = false;
+                    root.pan-ended();
                 }
             }
         }
@@ -134,7 +185,7 @@ export component CanvasLayerItem inherits Rectangle {
             return EventResult.reject;
         }
         clicked => {
-            if (!root.space-held) {
+            if (!root.space-held && !root.pan-active) {
                 root.selected-layer();
             }
         }
@@ -142,11 +193,19 @@ export component CanvasLayerItem inherits Rectangle {
             if (!self.pressed) {
                 root.last-dx = 0;
                 root.last-dy = 0;
-                root.drag-ended(root.layer-id);
+                if (root.pan-active) {
+                    root.pan-active = false;
+                    root.pan-ended();
+                } else {
+                    root.drag-ended(root.layer-id);
+                }
             }
         }
         moved => {
-            if (self.pressed && !root.space-held) {
+            if (root.pan-active || (self.pressed && root.space-held)) {
+                root.pan-moved(self.mouse-x / 1px - root.pan-last-x, self.mouse-y / 1px - root.pan-last-y);
+                root.track-pointer();
+            } else if (self.pressed && !root.space-held) {
                 root.dragged(
                     (self.mouse-x - self.pressed-x) / root.zoom / 1px - root.last-dx,
                     (self.mouse-y - self.pressed-y) / root.zoom / 1px - root.last-dy
@@ -160,38 +219,54 @@ export component CanvasLayerItem inherits Rectangle {
     if root.selected: ResizeHandle {
         handle: "top-left";
         zoom: root.zoom;
+        space-held: root.space-held;
         x: 0px;
         y: 0px;
         resize-started => { root.resize-started(root.layer-id); }
         handle-dragged(dx, dy) => { root.handle-dragged("top-left", dx, dy); }
         resize-ended => { root.resize-ended(root.layer-id); }
+        pan-started => { root.pan-started(); }
+        pan-moved(dx, dy) => { root.pan-moved(dx, dy); }
+        pan-ended => { root.pan-ended(); }
     }
     if root.selected: ResizeHandle {
         handle: "top-right";
         zoom: root.zoom;
+        space-held: root.space-held;
         x: parent.width - 12px;
         y: 0px;
         resize-started => { root.resize-started(root.layer-id); }
         handle-dragged(dx, dy) => { root.handle-dragged("top-right", dx, dy); }
         resize-ended => { root.resize-ended(root.layer-id); }
+        pan-started => { root.pan-started(); }
+        pan-moved(dx, dy) => { root.pan-moved(dx, dy); }
+        pan-ended => { root.pan-ended(); }
     }
     if root.selected: ResizeHandle {
         handle: "bottom-left";
         zoom: root.zoom;
+        space-held: root.space-held;
         x: 0px;
         y: parent.height - 12px;
         resize-started => { root.resize-started(root.layer-id); }
         handle-dragged(dx, dy) => { root.handle-dragged("bottom-left", dx, dy); }
         resize-ended => { root.resize-ended(root.layer-id); }
+        pan-started => { root.pan-started(); }
+        pan-moved(dx, dy) => { root.pan-moved(dx, dy); }
+        pan-ended => { root.pan-ended(); }
     }
     if root.selected: ResizeHandle {
         handle: "bottom-right";
         zoom: root.zoom;
+        space-held: root.space-held;
         x: parent.width - 12px;
         y: parent.height - 12px;
         resize-started => { root.resize-started(root.layer-id); }
         handle-dragged(dx, dy) => { root.handle-dragged("bottom-right", dx, dy); }
         resize-ended => { root.resize-ended(root.layer-id); }
+        pan-started => { root.pan-started(); }
+        pan-moved(dx, dy) => { root.pan-moved(dx, dy); }
+        pan-ended => { root.pan-ended(); }
     }
 
     if root.selected: Rectangle {
