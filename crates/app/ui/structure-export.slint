@@ -39,6 +39,13 @@ export component StructureExportPanel inherits Rectangle {
             SquareChoice { label: "30"; selected: root.fps == "30"; chosen => { root.fps = "30"; } }
             SquareChoice { label: "60"; selected: root.fps == "60"; chosen => { root.fps = "60"; } }
         }
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: "Quality"; color: #e4e4e7; font-size: 11px; vertical-alignment: center; }
+            SquareChoice { label: "Low"; selected: root.quality-preset == "low"; chosen => { root.quality-preset = "low"; } }
+            SquareChoice { label: "Medium"; selected: root.quality-preset == "medium"; chosen => { root.quality-preset = "medium"; } }
+            SquareChoice { label: "High"; selected: root.quality-preset == "high"; chosen => { root.quality-preset = "high"; } }
+        }
         Rectangle {
             height: 160px;
             background: #121214;

@@ -1,0 +1,77 @@
+import { SquareButton, SquareChoice } from "./components.slint";
+import { StructureVideoRow } from "./structure-types.slint";
+
+export component StructureToolbar inherits Rectangle {
+    in property <string> video-title: "No video";
+    in property <string> video-meta: "";
+    in property <bool> has-video: false;
+    in property <bool> dirty: false;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    in property <string> active-tab: "layers";
+    in property <[StructureVideoRow]> videos-model: [];
+
+    callback select-video(string);
+    callback add-clip();
+    callback add-image();
+    callback add-video();
+    callback add-blur();
+    callback undo();
+    callback redo();
+    callback fit-frame();
+    callback zoom-out();
+    callback zoom-in();
+    callback save();
+    callback save-template();
+    callback restore-template();
+    callback select-tab(string);
+
+    height: 76px;
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Video"; color: #858b96; font-size: 10px; vertical-alignment: center; }
+            Rectangle {
+                width: 220px;
+                height: 30px;
+                background: #202124;
+                border-width: 1px;
+                border-color: root.has-video ? #3d4149 : #27272a;
+                VerticalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    Text { text: root.video-title; color: #f4f4f5; font-size: 11px; overflow: elide; }
+                    Text { text: root.video-meta; color: #858b96; font-size: 9px; }
+                }
+                TouchArea { clicked => { root.select-tab("layers"); } }
+            }
+            Text { text: root.dirty ? "Unsaved changes" : "Saved"; color: root.dirty ? #fbbf24 : #86efac; font-size: 10px; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            SquareButton { label: "Undo"; width: 58px; height: 28px; enabled: root.can-undo; clicked => { root.undo(); } }
+            SquareButton { label: "Redo"; width: 58px; height: 28px; enabled: root.can-redo; clicked => { root.redo(); } }
+            SquareButton { label: "Save"; primary: true; width: 62px; height: 28px; clicked => { root.save(); } }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Text { text: "Insert"; color: #858b96; font-size: 10px; vertical-alignment: center; }
+            SquareButton { label: "Clip"; width: 58px; height: 26px; clicked => { root.add-clip(); } }
+            SquareButton { label: "Image"; width: 62px; height: 26px; clicked => { root.add-image(); } }
+            SquareButton { label: "Video"; width: 62px; height: 26px; clicked => { root.add-video(); } }
+            SquareButton { label: "Blur"; width: 58px; height: 26px; clicked => { root.add-blur(); } }
+            Rectangle { width: 1px; height: 20px; background: #3d4149; }
+            Text { text: "View"; color: #858b96; font-size: 10px; vertical-alignment: center; }
+            SquareButton { label: "Fit"; width: 48px; height: 26px; clicked => { root.fit-frame(); } }
+            SquareButton { label: "-"; width: 32px; height: 26px; clicked => { root.zoom-out(); } }
+            SquareButton { label: "+"; width: 32px; height: 26px; clicked => { root.zoom-in(); } }
+            Rectangle { horizontal-stretch: 1; }
+            SquareButton { label: "Template"; width: 78px; height: 26px; clicked => { root.save-template(); } }
+            SquareButton { label: "Restore"; width: 70px; height: 26px; clicked => { root.restore-template(); } }
+        }
+    }
+}

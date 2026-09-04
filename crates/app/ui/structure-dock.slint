@@ -1,0 +1,193 @@
+import { ScrollView } from "std-widgets.slint";
+import { SquareButton } from "./components.slint";
+import { StructureLayerPanel } from "./structure-layer-panel.slint";
+import { StructureInspector } from "./structure-inspector.slint";
+import { StructurePreview } from "./structure-preview.slint";
+import { StructureExportPanel } from "./structure-export.slint";
+import { StructureAssetRow, StructureLayerRow, StructureLogRow, MomentRow } from "./structure-types.slint";
+
+export component StructureDock inherits Rectangle {
+    in-out property <string> active-tab: "layers";
+    in property <[StructureLayerRow]> layers-model: [];
+    in property <[StructureAssetRow]> assets-model: [];
+    in property <[MomentRow]> moments-model: [];
+    in property <[StructureLogRow]> logs-model: [];
+    in property <string> selected-layer-id: "";
+    in property <string> inspector-name: "";
+    in property <string> inspector-type: "";
+    in-out property <string> inspector-x: "";
+    in-out property <string> inspector-y: "";
+    in-out property <string> inspector-w: "";
+    in-out property <string> inspector-h: "";
+    in property <bool> inspector-has-selection: false;
+    in-out property <string> preview-second: "0";
+    in property <image> preview-image;
+    in property <bool> preview-rendering: false;
+    in property <string> preview-status: "";
+    in property <string> preview-sample-path: "";
+    in property <bool> preview-has-frame: false;
+    in-out property <string> export-resolution: "1080x1920";
+    in-out property <string> export-quality: "high";
+    in-out property <string> export-fps: "30";
+    in property <bool> export-running: false;
+    in property <int> export-completed: 0;
+    in property <int> export-total: 0;
+    in property <string> export-status: "";
+
+    callback select-tab(string);
+    callback import-asset();
+    callback select-layer(string);
+    callback toggle-layer(string);
+    callback delete-layer(string);
+    callback raise-layer(string);
+    callback lower-layer(string);
+    callback commit-position();
+    callback commit-size();
+    callback render-frame();
+    callback render-sample();
+    callback open-sample();
+    callback clear-logs();
+    callback open-log-file();
+    callback toggle-moment(int);
+    callback start-export();
+    callback cancel-export();
+    callback retry-export();
+
+    width: 330px;
+    background: #1a1a1e;
+    border-width: 1px;
+    border-color: #27272a;
+
+    VerticalLayout {
+        spacing: 0px;
+        HorizontalLayout {
+            height: 34px;
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 2px;
+            for tab in ["layers", "inspector", "assets", "preview", "export", "logs"]: Rectangle {
+                horizontal-stretch: 1;
+                background: root.active-tab == tab ? #2a2a2e : #202124;
+                border-width: 1px;
+                border-color: root.active-tab == tab ? #6366f1 : #3d4149;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: tab == "layers" ? "Layers" : tab == "inspector" ? "Inspector" : tab == "assets" ? "Assets" : tab == "preview" ? "Preview" : tab == "export" ? "Export" : "Logs";
+                    color: root.active-tab == tab ? #ffffff : #a1a1aa;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.select-tab(tab); } }
+            }
+        }
+        Rectangle { height: 1px; background: #27272a; }
+        if root.active-tab == "layers": StructureLayerPanel {
+            vertical-stretch: 1;
+            model: root.layers-model;
+            selected-layer-id: root.selected-layer-id;
+            select-layer(id) => { root.select-layer(id); }
+            toggle-layer(id) => { root.toggle-layer(id); }
+            delete-layer(id) => { root.delete-layer(id); }
+            raise-layer(id) => { root.raise-layer(id); }
+            lower-layer(id) => { root.lower-layer(id); }
+        }
+        if root.active-tab == "inspector": StructureInspector {
+            vertical-stretch: 1;
+            layer-id: root.selected-layer-id;
+            layer-name: root.inspector-name;
+            layer-type: root.inspector-type;
+            position-x-text <=> root.inspector-x;
+            position-y-text <=> root.inspector-y;
+            width-text <=> root.inspector-w;
+            height-text <=> root.inspector-h;
+            has-selection: root.inspector-has-selection;
+            commit-position => { root.commit-position(); }
+            commit-size => { root.commit-size(); }
+        }
+        if root.active-tab == "assets": Rectangle {
+            background: #1a1a1e;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Text { text: "Session assets"; color: #818cf8; font-size: 11px; font-weight: 700; }
+                SquareButton { label: "Import image"; width: 110px; clicked => { root.import-asset(); } }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 3px;
+                        if root.assets-model.length == 0: Text { text: "No assets imported."; color: #858b96; font-size: 11px; }
+                        for asset in root.assets-model: Rectangle {
+                            height: 42px;
+                            background: #202124;
+                            border-width: 1px;
+                            border-color: #3d4149;
+                            VerticalLayout {
+                                padding: 5px;
+                                Text { text: asset.name; color: #ffffff; font-size: 11px; overflow: elide; }
+                                Text { text: asset.kind + "  " + asset.size + "  " + asset.status; color: #858b96; font-size: 9px; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.active-tab == "preview": StructurePreview {
+            vertical-stretch: 1;
+            preview-second-text <=> root.preview-second;
+            static-image: root.preview-image;
+            rendering: root.preview-rendering;
+            status: root.preview-status;
+            sample-path: root.preview-sample-path;
+            has-frame: root.preview-has-frame;
+            update-frame => { root.render-frame(); }
+            render-sample => { root.render-sample(); }
+            open-sample => { root.open-sample(); }
+        }
+        if root.active-tab == "export": StructureExportPanel {
+            vertical-stretch: 1;
+            moments-model: root.moments-model;
+            resolution <=> root.export-resolution;
+            quality-preset <=> root.export-quality;
+            fps <=> root.export-fps;
+            exporting: root.export-running;
+            completed: root.export-completed;
+            total: root.export-total;
+            status: root.export-status;
+            toggle-moment(idx) => { root.toggle-moment(idx); }
+            start-export => { root.start-export(); }
+            cancel-export => { root.cancel-export(); }
+            retry-failed => { root.retry-export(); }
+        }
+        if root.active-tab == "logs": Rectangle {
+            background: #121214;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 3px;
+                HorizontalLayout {
+                    height: 28px;
+                    SquareButton { label: "Clear"; width: 70px; clicked => { root.clear-logs(); } }
+                    SquareButton { label: "Open file"; width: 82px; clicked => { root.open-log-file(); } }
+                }
+                if root.logs-model.length == 0: Text { text: "No Structure events yet."; color: #858b96; font-size: 11px; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        for entry in root.logs-model: Rectangle {
+                            height: 38px;
+                            background: #202124;
+                            border-width: 1px;
+                            border-color: #27272a;
+                            VerticalLayout {
+                                padding: 4px;
+                                Text { text: entry.timestamp + "  " + entry.level + "  " + entry.scope; color: #858b96; font-size: 9px; }
+                                Text { text: entry.message; color: #d4d4d8; font-size: 10px; overflow: elide; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

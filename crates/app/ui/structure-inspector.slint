@@ -28,6 +28,26 @@ export component StructureInspector inherits Rectangle {
             spacing: 6px;
             Text { text: root.layer-name; color: #ffffff; font-size: 12px; font-weight: 600; wrap: word-wrap; }
             Text { text: root.layer-type; color: #a1a1aa; font-size: 11px; }
+            if root.layer-type == "clip": Rectangle {
+                height: 28px;
+                background: #202124;
+                Text { x: 8px; text: "Source video clip"; color: #d4d4d8; font-size: 11px; vertical-alignment: center; }
+            }
+            if root.layer-type == "image": Rectangle {
+                height: 28px;
+                background: #202124;
+                Text { x: 8px; text: "Image asset"; color: #d4d4d8; font-size: 11px; vertical-alignment: center; }
+            }
+            if root.layer-type == "video": Rectangle {
+                height: 28px;
+                background: #202124;
+                Text { x: 8px; text: "Video asset"; color: #d4d4d8; font-size: 11px; vertical-alignment: center; }
+            }
+            if root.layer-type == "shader": Rectangle {
+                height: 28px;
+                background: #202124;
+                Text { x: 8px; text: "Blur effect"; color: #d4d4d8; font-size: 11px; vertical-alignment: center; }
+            }
             Text { text: "Position X / Y"; color: #e4e4e7; font-size: 11px; font-weight: 600; }
             HorizontalLayout {
                 spacing: 6px;

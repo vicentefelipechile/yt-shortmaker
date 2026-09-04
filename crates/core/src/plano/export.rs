@@ -52,6 +52,34 @@ impl ExportProfile {
         self
     }
 
+    pub fn with_quality(mut self, quality: &str) -> Self {
+        self.video_bitrate = match quality {
+            "low" => {
+                if self.width == 720 {
+                    "3M"
+                } else {
+                    "5M"
+                }
+            }
+            "medium" => {
+                if self.width == 720 {
+                    "5M"
+                } else {
+                    "8M"
+                }
+            }
+            _ => {
+                if self.width == 720 {
+                    "8M"
+                } else {
+                    "12M"
+                }
+            }
+        }
+        .to_string();
+        self
+    }
+
     pub fn hash(&self) -> String {
         format!(
             "{}x{}-{}-{}fps",
@@ -81,7 +109,7 @@ pub fn build_frame_command(
     doc.validate().map_err(|e| anyhow::anyhow!(e))?;
     let plano = doc.to_plano();
     let (filter, inputs) = build_ffmpeg_filter(&plano, &video_path.to_string_lossy());
-    let args = vec![
+    let mut args = vec![
         "-y".to_string(),
         "-ss".to_string(),
         second.to_string(),
@@ -97,8 +125,7 @@ pub fn build_frame_command(
         "2".to_string(),
         output.to_string_lossy().to_string(),
     ];
-    // Note: additional image/video inputs are appended after -i 0 when present.
-    // For Phase preview we support Clip+Shader only; extra inputs are validated separately.
+    append_additional_inputs(&mut args, &inputs);
     Ok(RenderCommand {
         inputs,
         filter,
@@ -122,7 +149,7 @@ pub fn build_sample_command(
     let plano = doc.to_plano();
     let (filter, inputs) = build_ffmpeg_filter(&plano, &video_path.to_string_lossy());
     let size = format!("{}x{}", profile.width, profile.height);
-    let args = vec![
+    let mut args = vec![
         "-y".to_string(),
         "-ss".to_string(),
         start_sec.to_string(),
@@ -153,12 +180,37 @@ pub fn build_sample_command(
         "128k".to_string(),
         output.to_string_lossy().to_string(),
     ];
+    append_additional_inputs(&mut args, &inputs);
     Ok(RenderCommand {
         inputs,
         filter,
         args,
         output: output.to_path_buf(),
     })
+}
+
+fn append_additional_inputs(args: &mut Vec<String>, inputs: &[String]) {
+    let mut insertion = args
+        .iter()
+        .position(|arg| arg == "-i")
+        .map(|index| index + 2)
+        .unwrap_or(0);
+    for input in inputs.iter().skip(1) {
+        let is_image = std::path::Path::new(input)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+            .unwrap_or(false);
+        let mut values = Vec::with_capacity(3);
+        if is_image {
+            values.push("-loop".to_string());
+            values.push("1".to_string());
+        }
+        values.push("-i".to_string());
+        values.push(input.clone());
+        args.splice(insertion..insertion, values);
+        insertion += if is_image { 4 } else { 2 };
+    }
 }
 
 pub fn structure_hash(doc: &PlanoDocument) -> String {
@@ -221,6 +273,33 @@ pub fn verify_output(path: &Path) -> Result<()> {
     }
     // Accept both configured outputs; compiler currently renders OUTPUT_WIDTHxHEIGHT.
     let _ = (OUTPUT_WIDTH, OUTPUT_HEIGHT);
+    Ok(())
+}
+
+pub fn verify_video_output(
+    path: &Path,
+    profile: &ExportProfile,
+    expected_duration: u64,
+) -> Result<()> {
+    verify_output(path)?;
+    let (width, height) = crate::media::ffmpeg::get_resolution(path)?;
+    if (width, height) != (profile.width, profile.height) {
+        anyhow::bail!(
+            "output resolution is {}x{}, expected {}x{}",
+            width,
+            height,
+            profile.width,
+            profile.height
+        );
+    }
+    let duration = crate::media::ffmpeg::get_duration(path)?;
+    if duration + 1.0 < expected_duration as f64 || duration > expected_duration as f64 + 2.0 {
+        anyhow::bail!(
+            "output duration {:.2}s is outside expected {}s",
+            duration,
+            expected_duration
+        );
+    }
     Ok(())
 }
 

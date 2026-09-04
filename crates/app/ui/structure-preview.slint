@@ -8,9 +8,11 @@ export component StructurePreview inherits Rectangle {
     in property <bool> rendering: false;
     in property <string> status: "";
     in property <bool> has-frame: false;
+    in property <string> sample-path: "";
 
     callback update-frame();
     callback render-sample();
+    callback open-sample();
 
     background: #1a1a1e;
     border-width: 1px;
@@ -26,6 +28,7 @@ export component StructurePreview inherits Rectangle {
             SquareInput { text <=> root.preview-second-text; placeholder-text: "0"; width: 80px; }
             SquareButton { label: "Frame"; width: 80px; clicked => { root.update-frame(); } }
             SquareButton { label: "Sample 4s"; width: 100px; clicked => { root.render-sample(); } }
+            if root.sample-path != "": SquareButton { label: "Open sample"; width: 100px; clicked => { root.open-sample(); } }
         }
         if root.has-frame: Rectangle {
             height: 220px;

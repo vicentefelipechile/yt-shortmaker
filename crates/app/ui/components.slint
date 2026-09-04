@@ -5,16 +5,17 @@
 export component SquareButton inherits Rectangle {
     in property <string> label;
     in property <bool> primary: false;
+    in property <bool> enabled: true;
     callback clicked;
     height: 34px;
     min-width: 90px;
-    background: primary ? #0878c9 : #252629;
+    background: !root.enabled ? #202124 : primary ? #0878c9 : #252629;
     border-width: 1px;
     border-color: primary ? #0878c9 : #3a3c42;
 
     states [
         hover when touch.has-hover : {
-            background: primary ? #0a8be4 : #303237;
+            background: !root.enabled ? #202124 : primary ? #0a8be4 : #303237;
         }
     ]
 
@@ -29,7 +30,7 @@ export component SquareButton inherits Rectangle {
     }
 
     touch := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => { if (root.enabled) { root.clicked(); } }
     }
 }
 

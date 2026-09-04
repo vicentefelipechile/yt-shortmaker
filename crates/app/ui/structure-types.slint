@@ -30,6 +30,10 @@ export struct CanvasLayer {
     height: float,
     visible: bool,
     selected: bool,
+    preview-image: image,
+    preview-available: bool,
+    asset-name: string,
+    asset-valid: bool,
 }
 
 export struct MomentRow {
@@ -40,4 +44,22 @@ export struct MomentRow {
     category: string,
     selected: bool,
     export-status: string,
+}
+
+export struct StructureAssetRow {
+    id: string,
+    name: string,
+    kind: string,
+    size: string,
+    status: string,
+    used-count: int,
+}
+
+export struct StructureLogRow {
+    id: int,
+    timestamp: string,
+    level: string,
+    scope: string,
+    message: string,
+    detail: string,
 }
