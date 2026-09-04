@@ -55,8 +55,13 @@ export component StructureEditor inherits Rectangle {
     callback undo();
     callback redo();
     callback select-layer(string);
+    callback drag-start(string);
     callback drag-layer(string, float, float);
+    callback drag-finish(string);
+    callback resize-start(string);
     callback resize-layer(string, string, float, float);
+    callback resize-finish(string);
+    callback center-requested();
     callback toggle-layer(string);
     callback delete-layer(string);
     callback raise-layer(string);
@@ -97,9 +102,9 @@ export component StructureEditor inherits Rectangle {
             add-blur => { root.add-blur-layer(); }
             undo => { root.undo(); }
             redo => { root.redo(); }
-            fit-frame => { root.zoom = 0.3; }
-            zoom-out => { root.zoom = root.zoom > 0.1 ? root.zoom - 0.05 : 0.1; }
-            zoom-in => { root.zoom = root.zoom < 2.0 ? root.zoom + 0.05 : 2.0; }
+            fit-frame => { canvas.fit-frame(); }
+            zoom-out => { canvas.request-zoom-out(); }
+            zoom-in => { canvas.request-zoom-in(); }
             save => { root.save-structure(); }
             save-template => { root.save-global-template(); }
             restore-template => { root.restore-global-template(); }
@@ -108,14 +113,21 @@ export component StructureEditor inherits Rectangle {
         HorizontalLayout {
             vertical-stretch: 1;
             spacing: 8px;
-            StructureCanvas {
+            canvas := StructureCanvas {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 layers: root.canvas-layers;
+                selected-layer-id: root.selected-layer-id;
+                selected-video-id: root.selected-video-id;
                 zoom <=> root.zoom;
                 select-layer(id) => { root.select-layer(id); }
+                drag-start(id) => { root.drag-start(id); }
                 drag-layer(id, dx, dy) => { root.drag-layer(id, dx, dy); }
+                drag-finish(id) => { root.drag-finish(id); }
+                resize-start(id) => { root.resize-start(id); }
                 resize-layer(id, handle, dx, dy) => { root.resize-layer(id, handle, dx, dy); }
+                resize-finish(id) => { root.resize-finish(id); }
+                request-center => { root.center-requested(); }
             }
             StructureDock {
                 vertical-stretch: 1;

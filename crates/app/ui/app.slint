@@ -187,6 +187,7 @@ export component MainWindow inherits Window {
     in property <int> structure-export-total: 0;
     in property <string> structure-export-status: "";
     in-out property <string> structure-active-dock-tab: "layers";
+    in-out property <float> structure-zoom: 0.3;
     in property <string> structure-active-video-title: "No video";
     in property <string> structure-active-video-meta: "";
     in property <bool> structure-document-dirty: false;
@@ -244,8 +245,13 @@ export component MainWindow inherits Window {
     callback restore-global-template();
     callback load-structure-preset();
     callback select-structure-layer(string);
+    callback drag-structure-start(string);
     callback move-structure-layer(string, float, float);
+    callback drag-structure-finish(string);
+    callback resize-structure-start(string);
     callback resize-structure-layer(string, string, float, float);
+    callback resize-structure-finish(string);
+    callback center-structure-canvas();
     callback toggle-structure-layer(string);
     callback delete-structure-layer(string);
     callback raise-structure-layer(string);
@@ -301,7 +307,89 @@ export component MainWindow inherits Window {
             horizontal-stretch: 1;
             background: #121214;
             VerticalLayout {
-                ScrollView {
+                if route == "structure": Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    background: #121214;
+                    clip: true;
+                    StructureEditor {
+                        width: parent.width;
+                        height: parent.height;
+                        title: root.tr-structure-title;
+                        description: root.tr-structure-desc;
+                        status: root.structure-status;
+                        has-video: root.structure-has-video;
+                        canvas-layers: root.structure-canvas-layers;
+                        layers-model: root.structure-layers-model;
+                        videos-model: root.structure-videos-model;
+                        assets-model: root.structure-assets-model;
+                        logs-model: root.structure-logs-model;
+                        active-dock-tab <=> root.structure-active-dock-tab;
+                        zoom <=> root.structure-zoom;
+                        active-video-title: root.structure-active-video-title;
+                        active-video-meta: root.structure-active-video-meta;
+                        document-dirty: root.structure-document-dirty;
+                        can-undo: root.structure-can-undo;
+                        can-redo: root.structure-can-redo;
+                        selected-video-id <=> root.structure-selected-video-id;
+                        selected-layer-id <=> root.structure-selected-layer-id;
+                        select-video(id) => { root.select-structure-video(id); }
+                        undo => { root.undo-structure(); }
+                        redo => { root.redo-structure(); }
+                        inspector-name: root.structure-inspector-name;
+                        inspector-type: root.structure-inspector-type;
+                        inspector-x <=> root.structure-inspector-x;
+                        inspector-y <=> root.structure-inspector-y;
+                        inspector-w <=> root.structure-inspector-w;
+                        inspector-h <=> root.structure-inspector-h;
+                        inspector-has-selection: root.structure-inspector-has-selection;
+                        preview-second-text <=> root.structure-preview-second;
+                        preview-static-image: root.structure-preview-image;
+                        preview-rendering: root.structure-preview-rendering;
+                        preview-status: root.structure-preview-status;
+                        preview-sample-path: root.structure-preview-sample-path;
+                        preview-has-frame: root.structure-preview-has-frame;
+                        save-structure => { root.save-structure(); }
+                        save-global-template => { root.save-global-template(); }
+                        restore-global-template => { root.restore-global-template(); }
+                        add-clip-layer => { root.add-structure-clip(); }
+                        add-image-layer => { root.add-structure-image(); }
+                        add-video-layer => { root.add-structure-video(); }
+                        add-blur-layer => { root.add-structure-blur(); }
+                        select-layer(id) => { root.select-structure-layer(id); }
+                        drag-start(id) => { root.drag-structure-start(id); }
+                        drag-layer(id, dx, dy) => { root.move-structure-layer(id, dx, dy); }
+                        drag-finish(id) => { root.drag-structure-finish(id); }
+                        resize-start(id) => { root.resize-structure-start(id); }
+                        resize-layer(id, handle, dx, dy) => { root.resize-structure-layer(id, handle, dx, dy); }
+                        resize-finish(id) => { root.resize-structure-finish(id); }
+                        toggle-layer(id) => { root.toggle-structure-layer(id); }
+                        delete-layer(id) => { root.delete-structure-layer(id); }
+                        raise-layer(id) => { root.raise-structure-layer(id); }
+                        lower-layer(id) => { root.lower-structure-layer(id); }
+                        commit-position => { root.commit-structure-position(); }
+                        commit-size => { root.commit-structure-size(); }
+                        render-preview-frame => { root.render-structure-preview(); }
+                        render-preview-sample => { root.render-structure-sample(); }
+                        open-preview-sample => { root.open-structure-sample(); }
+                        clear-logs => { root.clear-structure-logs(); }
+                        open-log-file => { root.open-structure-log-file(); }
+                        moments-model: root.structure-moments-model;
+                        export-resolution <=> root.structure-export-resolution;
+                        export-quality <=> root.structure-export-quality;
+                        export-fps <=> root.structure-export-fps;
+                        export-running: root.structure-export-running;
+                        export-completed: root.structure-export-completed;
+                        export-total: root.structure-export-total;
+                        export-status: root.structure-export-status;
+                        toggle-moment(idx) => { root.toggle-structure-moment(idx); }
+                        start-export => { root.start-structure-export(); }
+                        cancel-export => { root.cancel-structure-export(); }
+                        retry-failed => { root.retry-structure-export(); }
+                        center-requested => { root.center-structure-canvas(); }
+                    }
+                }
+                if route != "structure": ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         padding: 24px;
@@ -541,75 +629,6 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
-                    }
-
-                    if route == "structure": StructureEditor {
-                        title: root.tr-structure-title;
-                        description: root.tr-structure-desc;
-                        status: root.structure-status;
-                        has-video: root.structure-has-video;
-                        canvas-layers: root.structure-canvas-layers;
-                        layers-model: root.structure-layers-model;
-                        videos-model: root.structure-videos-model;
-                        assets-model: root.structure-assets-model;
-                        logs-model: root.structure-logs-model;
-                        active-dock-tab <=> root.structure-active-dock-tab;
-                        active-video-title: root.structure-active-video-title;
-                        active-video-meta: root.structure-active-video-meta;
-                        document-dirty: root.structure-document-dirty;
-                        can-undo: root.structure-can-undo;
-                        can-redo: root.structure-can-redo;
-                        selected-video-id <=> root.structure-selected-video-id;
-                        selected-layer-id <=> root.structure-selected-layer-id;
-                         select-video(id) => { root.select-structure-video(id); }
-                         undo => { root.undo-structure(); }
-                         redo => { root.redo-structure(); }
-                        inspector-name: root.structure-inspector-name;
-                        inspector-type: root.structure-inspector-type;
-                        inspector-x <=> root.structure-inspector-x;
-                        inspector-y <=> root.structure-inspector-y;
-                        inspector-w <=> root.structure-inspector-w;
-                        inspector-h <=> root.structure-inspector-h;
-                        inspector-has-selection: root.structure-inspector-has-selection;
-                        preview-second-text <=> root.structure-preview-second;
-                        preview-static-image: root.structure-preview-image;
-                        preview-rendering: root.structure-preview-rendering;
-                         preview-status: root.structure-preview-status;
-                         preview-sample-path: root.structure-preview-sample-path;
-                        preview-has-frame: root.structure-preview-has-frame;
-                        save-structure => { root.save-structure(); }
-                        save-global-template => { root.save-global-template(); }
-                        restore-global-template => { root.restore-global-template(); }
-                        add-clip-layer => { root.add-structure-clip(); }
-                        add-image-layer => { root.add-structure-image(); }
-                        add-video-layer => { root.add-structure-video(); }
-                        add-blur-layer => { root.add-structure-blur(); }
-                        select-layer(id) => { root.select-structure-layer(id); }
-                        drag-layer(id, dx, dy) => { root.move-structure-layer(id, dx, dy); }
-                        resize-layer(id, handle, dx, dy) => { root.resize-structure-layer(id, handle, dx, dy); }
-                        toggle-layer(id) => { root.toggle-structure-layer(id); }
-                        delete-layer(id) => { root.delete-structure-layer(id); }
-                        raise-layer(id) => { root.raise-structure-layer(id); }
-                        lower-layer(id) => { root.lower-structure-layer(id); }
-                        commit-position => { root.commit-structure-position(); }
-                        commit-size => { root.commit-structure-size(); }
-                        render-preview-frame => { root.render-structure-preview(); }
-                         render-preview-sample => { root.render-structure-sample(); }
-                         open-preview-sample => { root.open-structure-sample(); }
-                         clear-logs => { root.clear-structure-logs(); }
-                         open-log-file => { root.open-structure-log-file(); }
-                        moments-model: root.structure-moments-model;
-                        export-resolution <=> root.structure-export-resolution;
-                        export-quality <=> root.structure-export-quality;
-                        export-fps <=> root.structure-export-fps;
-                        export-running: root.structure-export-running;
-                        export-completed: root.structure-export-completed;
-                        export-total: root.structure-export-total;
-                        export-status: root.structure-export-status;
-                        toggle-moment(idx) => { root.toggle-structure-moment(idx); }
-                        start-export => { root.start-structure-export(); }
-                        cancel-export => { root.cancel-structure-export(); }
-                        retry-failed => { root.retry-structure-export(); }
                     }
 
                     if route == "export": VerticalLayout {

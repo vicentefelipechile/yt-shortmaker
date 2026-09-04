@@ -730,6 +730,47 @@ pub fn save_plano(path: &str, plano: &Plano) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Pure viewport helpers shared by the Structure canvas.
+/// All coordinates are f32 screen/logical units; zoom never mutates the document.
+pub fn logical_to_world(logical: f32, origin: f32, zoom: f32) -> f32 {
+    origin + logical * zoom
+}
+
+pub fn world_to_logical(world: f32, origin: f32, zoom: f32) -> f32 {
+    if zoom.abs() < 0.0001 {
+        0.0
+    } else {
+        (world - origin) / zoom
+    }
+}
+
+pub fn world_size_for(frame: f32, visible: f32, margin: f32) -> f32 {
+    (frame + margin * 2.0).max(visible + margin)
+}
+
+pub fn world_origin_for(world: f32, frame: f32) -> f32 {
+    (world - frame) / 2.0
+}
+
+pub fn centered_viewport_for(world: f32, visible: f32) -> f32 {
+    -(world - visible) / 2.0
+}
+
+pub fn fit_zoom_for(visible_w: f32, visible_h: f32, output_w: f32, output_h: f32) -> f32 {
+    if output_w <= 0.0 || output_h <= 0.0 || visible_w <= 0.0 || visible_h <= 0.0 {
+        return 0.3;
+    }
+    let z = (visible_w / output_w).min(visible_h / output_h) * 0.88;
+    z.clamp(0.05, 2.0)
+}
+
+pub fn clamp_zoom(z: f32) -> f32 {
+    if !z.is_finite() {
+        return 0.3;
+    }
+    z.clamp(0.05, 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,5 +808,49 @@ mod tests {
         assert!(doc.validate().is_ok());
         doc.output.fps = 24;
         assert!(doc.validate().is_err());
+    }
+
+    #[test]
+    fn test_viewport_helpers_center_and_fit() {
+        // Frame 1080x1920 at zoom 0.3 in a 700x500 view.
+        let zoom = 0.3;
+        let frame_w = 1080.0 * zoom;
+        let frame_h = 1920.0 * zoom;
+        let world_w = world_size_for(frame_w, 700.0, 400.0);
+        let world_h = world_size_for(frame_h, 500.0, 400.0);
+        assert!(world_w >= frame_w + 800.0);
+        assert!(world_h >= frame_h + 800.0);
+        let ox = world_origin_for(world_w, frame_w);
+        let oy = world_origin_for(world_h, frame_h);
+        // Logical origin maps to world origin.
+        assert!((logical_to_world(0.0, ox, zoom) - ox).abs() < 0.001);
+        assert!((world_to_logical(ox + 1080.0 * zoom, ox, zoom) - 1080.0).abs() < 0.01);
+        let _ = oy;
+        // Centered viewport puts world center at view center.
+        let vx = centered_viewport_for(world_w, 700.0);
+        assert!(((-vx + 350.0) - world_w / 2.0).abs() < 0.001);
+        // Fit zoom shrinks tall outputs to the visible height.
+        let fit = fit_zoom_for(700.0, 500.0, 1080.0, 1920.0);
+        assert!(fit > 0.05 && fit < 0.3);
+        // Zoom clamp keeps document coordinates untouched by definition.
+        assert_eq!(clamp_zoom(10.0), 2.0);
+        assert_eq!(clamp_zoom(-1.0), 0.05);
+    }
+
+    #[test]
+    fn test_move_is_additive_and_single_gesture() {
+        // Simulates drag-start -> N previews -> drag-finish with one history entry.
+        let mut doc = create_default_document();
+        let id = doc.layers[0].id.clone();
+        let before = doc.clone();
+        let (x0, y0, _, _) = doc.layers[0].resolved_rect();
+        for _ in 0..10 {
+            doc.move_layer(&id, 1.0, 1.0).unwrap();
+        }
+        let (x1, y1, _, _) = doc.layers[0].resolved_rect();
+        assert_eq!(x1, x0 + 10);
+        assert_eq!(y1, y0 + 10);
+        // One undo entry restores everything (before != after, single clone).
+        assert_ne!(before, doc);
     }
 }

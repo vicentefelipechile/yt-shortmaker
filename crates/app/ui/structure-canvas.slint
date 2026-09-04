@@ -4,19 +4,96 @@ import { CanvasLayer } from "./structure-types.slint";
 
 export component StructureCanvas inherits Rectangle {
     in property <[CanvasLayer]> layers: [];
-    in-out property <string> selected-layer-id: "";
+    in property <string> selected-layer-id: "";
+    in property <string> selected-video-id: "";
     in-out property <float> zoom: 0.3;
     in property <int> output-width: 1080;
     in property <int> output-height: 1920;
 
     callback select-layer(string);
+    callback drag-start(string);
     callback drag-layer(string, float, float);
+    callback drag-finish(string);
+    callback resize-start(string);
     callback resize-layer(string, string, float, float);
+    callback resize-finish(string);
+    callback request-center();
 
-    property <float> world-width: 12000;
-    property <float> world-height: 12000;
-    property <float> document-origin-x: (world-width - output-width * root.zoom) / 2;
-    property <float> document-origin-y: (world-height - output-height * root.zoom) / 2;
+    // Viewport state: owned here, bound to ScrollView.
+    in-out property <length> view-x: 0px;
+    in-out property <length> view-y: 0px;
+    in-out property <bool> space-held: false;
+    property <bool> view-centered: false;
+
+    // Pan gesture state (screen px, incremental).
+    property <float> pan-last-dx: 0;
+    property <float> pan-last-dy: 0;
+    property <bool> pan-active: false;
+
+    property <length> frame-w: root.output-width * root.zoom * 1px;
+    property <length> frame-h: root.output-height * root.zoom * 1px;
+    property <length> world-w: Math.max(root.frame-w + 800px, scroll.visible-width + 400px);
+    property <length> world-h: Math.max(root.frame-h + 800px, scroll.visible-height + 400px);
+    property <length> origin-x: (root.world-w - root.frame-w) / 2;
+    property <length> origin-y: (root.world-h - root.frame-h) / 2;
+
+    function apply-zoom(req-zoom: float) {
+        let cz: float = req-zoom < 0.05 ? 0.05 : req-zoom > 2.0 ? 2.0 : req-zoom;
+        if (cz == root.zoom) {
+            return;
+        }
+        if (root.zoom <= 0.001) {
+            root.zoom = cz;
+            return;
+        }
+        let cx: float = (-root.view-x + scroll.visible-width / 2 - root.origin-x) / 1px / root.zoom;
+        let cy: float = (-root.view-y + scroll.visible-height / 2 - root.origin-y) / 1px / root.zoom;
+        root.zoom = cz;
+        let nfw: length = root.output-width * cz * 1px;
+        let nfh: length = root.output-height * cz * 1px;
+        let nww: length = Math.max(nfw + 800px, scroll.visible-width + 400px);
+        let nwh: length = Math.max(nfh + 800px, scroll.visible-height + 400px);
+        let nox: length = (nww - nfw) / 2;
+        let noy: length = (nwh - nfh) / 2;
+        root.view-x = -(nox + cx * cz * 1px - scroll.visible-width / 2);
+        root.view-y = -(noy + cy * cz * 1px - scroll.visible-height / 2);
+    }
+
+    public function request-zoom-in() {
+        self.apply-zoom(root.zoom + 0.05);
+    }
+
+    public function request-zoom-out() {
+        if (root.zoom > 0.1) {
+            self.apply-zoom(root.zoom - 0.05);
+        } else {
+            self.apply-zoom(0.05);
+        }
+    }
+
+    public function center-frame() {
+        root.view-x = -(root.world-w - scroll.visible-width) / 2;
+        root.view-y = -(root.world-h - scroll.visible-height) / 2;
+        root.view-centered = true;
+    }
+
+    public function fit-frame() {
+        if (scroll.visible-width <= 0px || scroll.visible-height <= 0px) {
+            self.center-frame();
+            return;
+        }
+        let zw: float = scroll.visible-width / 1px / root.output-width;
+        let zh: float = scroll.visible-height / 1px / root.output-height;
+        let zraw: float = (zw < zh ? zw : zh) * 0.88;
+        let z: float = zraw < 0.05 ? 0.05 : zraw > 2.0 ? 2.0 : zraw;
+        self.apply-zoom(z);
+        self.center-frame();
+    }
+
+    changed selected-video-id => {
+        root.view-centered = false;
+        root.center-frame();
+    }
 
     background: #121214;
     border-width: 1px;
@@ -29,68 +106,146 @@ export component StructureCanvas inherits Rectangle {
             height: 32px;
             background: #1a1a1e;
             Text { x: 10px; text: "Canvas workspace"; color: #818cf8; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-            Text { x: parent.width - 205px; width: 195px; text: "Middle drag or Space + drag to pan"; color: #858b96; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
+            Text { x: parent.width - 260px; width: 250px; text: "Middle drag or Space + drag to pan"; color: #858b96; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
         }
         Rectangle { height: 1px; background: #27272a; }
-        ScrollView {
+        scope := FocusScope {
             vertical-stretch: 1;
             horizontal-stretch: 1;
-            mouse-drag-pan-enabled: true;
-            viewport-x: root.document-origin-x * 1px - self.width / 2;
-            viewport-y: root.document-origin-y * 1px - self.height / 2;
-            viewport-width: root.world-width * 1px;
-            viewport-height: root.world-height * 1px;
-            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
-            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
-            Rectangle {
-                width: root.world-width * 1px;
-                height: root.world-height * 1px;
-                background: #101012;
-                for col in 120: Rectangle {
-                    x: col * 100px;
-                    width: 1px;
-                    height: parent.height;
-                    background: #1b1b1f;
+            key-pressed(event) => {
+                if (event.text == " ") {
+                    root.space-held = true;
+                    return EventResult.accept;
                 }
-                for row in 120: Rectangle {
-                    y: row * 100px;
-                    width: parent.width;
-                    height: 1px;
-                    background: #1b1b1f;
+                return EventResult.reject;
+            }
+            key-released(event) => {
+                if (event.text == " ") {
+                    root.space-held = false;
+                    return EventResult.accept;
                 }
-                for layer in root.layers: CanvasLayerItem {
-                    layer-id: layer.id;
-                    layer-type: layer.layer-type;
-                    layer-x: root.document-origin-x / root.zoom + layer.x;
-                    layer-y: root.document-origin-y / root.zoom + layer.y;
-                    layer-width: layer.width;
-                    layer-height: layer.height;
-                    layer-visible: layer.visible;
-                    selected: layer.selected;
-                    zoom: root.zoom;
-                    preview-image: layer.preview-image;
-                    preview-available: layer.preview-available;
-                    asset-name: layer.asset-name;
-                    asset-valid: layer.asset-valid;
-                    selected-layer => { root.select-layer(layer.id); }
-                    dragged(dx, dy) => { root.drag-layer(layer.id, dx, dy); }
-                    handle-dragged(handle, dx, dy) => { root.resize-layer(layer.id, handle, dx, dy); }
-                }
+                return EventResult.reject;
+            }
+            scroll := ScrollView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                mouse-drag-pan-enabled: false;
+                viewport-x <=> root.view-x;
+                viewport-y <=> root.view-y;
+                viewport-width: root.world-w;
+                viewport-height: root.world-h;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 Rectangle {
-                    x: root.document-origin-x * 1px;
-                    y: root.document-origin-y * 1px;
-                    width: root.output-width * root.zoom * 1px;
-                    height: root.output-height * root.zoom * 1px;
-                    border-width: 2px;
-                    border-color: #6366f1;
-                    background: transparent;
+                    width: root.world-w;
+                    height: root.world-h;
+                    background: #101012;
+                    for col in 40: Rectangle {
+                        x: col * 100px;
+                        width: 1px;
+                        height: parent.height;
+                        background: #1b1b1f;
+                    }
+                    for row in 40: Rectangle {
+                        y: row * 100px;
+                        width: parent.width;
+                        height: 1px;
+                        background: #1b1b1f;
+                    }
+                    // Background pan area: behind layers, middle + space+left only.
+                    pan-area := TouchArea {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: root.space-held ? MouseCursor.grab : MouseCursor.default;
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
+                                root.pan-active = true;
+                                root.pan-last-dx = 0;
+                                root.pan-last-dy = 0;
+                                scope.focus();
+                            } else if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                scope.focus();
+                                if (root.space-held) {
+                                    root.pan-active = true;
+                                    root.pan-last-dx = 0;
+                                    root.pan-last-dy = 0;
+                                }
+                            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                                root.pan-active = false;
+                                root.pan-last-dx = 0;
+                                root.pan-last-dy = 0;
+                            }
+                        }
+                        scroll-event(event) => {
+                            if (event.modifiers.control) {
+                                if (event.delta-y > 0px) {
+                                    root.request-zoom-in();
+                                } else if (event.delta-y < 0px) {
+                                    root.request-zoom-out();
+                                }
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                        moved => {
+                            if (root.pan-active && self.pressed) {
+                                root.view-x = root.view-x + ((self.mouse-x - self.pressed-x) / 1px - root.pan-last-dx) * 1px;
+                                root.view-y = root.view-y + ((self.mouse-y - self.pressed-y) / 1px - root.pan-last-dy) * 1px;
+                                root.pan-last-dx = (self.mouse-x - self.pressed-x) / 1px;
+                                root.pan-last-dy = (self.mouse-y - self.pressed-y) / 1px;
+                            }
+                        }
+                    }
+                    for layer in root.layers: CanvasLayerItem {
+                        layer-id: layer.id;
+                        layer-type: layer.layer-type;
+                        layer-x: root.origin-x / 1px / root.zoom + layer.x;
+                        layer-y: root.origin-y / 1px / root.zoom + layer.y;
+                        layer-width: layer.width;
+                        layer-height: layer.height;
+                        layer-visible: layer.visible;
+                        selected: layer.selected;
+                        zoom: root.zoom;
+                        space-held: root.space-held;
+                        preview-image: layer.preview-image;
+                        preview-available: layer.preview-available;
+                        asset-name: layer.asset-name;
+                        asset-valid: layer.asset-valid;
+                        selected-layer => { root.select-layer(layer.id); }
+                        drag-started(id) => { root.drag-start(id); }
+                        dragged(dx, dy) => { root.drag-layer(layer.id, dx, dy); }
+                        drag-ended(id) => { root.drag-finish(id); }
+                        resize-started(id) => { root.resize-start(id); }
+                        handle-dragged(handle, dx, dy) => { root.resize-layer(layer.id, handle, dx, dy); }
+                        resize-ended(id) => { root.resize-finish(id); }
+                        wheel-zoom-in => { root.request-zoom-in(); }
+                        wheel-zoom-out => { root.request-zoom-out(); }
+                    }
+                    Rectangle {
+                        x: root.origin-x;
+                        y: root.origin-y;
+                        width: root.frame-w;
+                        height: root.frame-h;
+                        border-width: 2px;
+                        border-color: #6366f1;
+                        background: transparent;
+                    }
+                    Text {
+                        x: root.origin-x;
+                        y: root.origin-y - 22px;
+                        text: "OUTPUT 9:16  " + root.output-width + "x" + root.output-height;
+                        color: #818cf8;
+                        font-size: 10px;
+                    }
                 }
-                Text {
-                    x: root.document-origin-x * 1px;
-                    y: root.document-origin-y * 1px - 22px;
-                    text: "OUTPUT 9:16  " + root.output-width + "x" + root.output-height;
-                    color: #818cf8;
-                    font-size: 10px;
+                changed visible-width => {
+                    if (!root.view-centered) {
+                        root.center-frame();
+                    }
                 }
             }
         }

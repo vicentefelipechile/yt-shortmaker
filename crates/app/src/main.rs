@@ -518,6 +518,114 @@ fn active_video_id(app: &MainWindow) -> String {
     app.get_video_id().to_string()
 }
 
+// Active document cache: in-memory during drag, persisted on gesture finish.
+// Guarantees a single undo entry per gesture instead of one per mouse delta.
+static STRUCTURE_ACTIVE_DOCS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, yt_shortmaker_core::plano::schema::PlanoDocument>,
+    >,
+> = std::sync::OnceLock::new();
+static STRUCTURE_GESTURE_BEFORE: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, yt_shortmaker_core::plano::schema::PlanoDocument>,
+    >,
+> = std::sync::OnceLock::new();
+
+fn structure_active_docs() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, yt_shortmaker_core::plano::schema::PlanoDocument>,
+> {
+    STRUCTURE_ACTIVE_DOCS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn structure_gesture_before() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, yt_shortmaker_core::plano::schema::PlanoDocument>,
+> {
+    STRUCTURE_GESTURE_BEFORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn load_active_structure_doc(video_id: &str) -> yt_shortmaker_core::plano::schema::PlanoDocument {
+    if let Some(cached) = structure_active_docs()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(video_id).cloned())
+    {
+        return cached;
+    }
+    let path = structure_path_for(video_id);
+    let doc = if path.exists() {
+        yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
+            .unwrap_or_default()
+    } else {
+        yt_shortmaker_core::plano::schema::create_empty_document()
+    };
+    if let Ok(mut m) = structure_active_docs().lock() {
+        m.insert(video_id.to_string(), doc.clone());
+    }
+    doc
+}
+
+fn set_active_structure_doc(video_id: &str, doc: yt_shortmaker_core::plano::schema::PlanoDocument) {
+    if let Ok(mut m) = structure_active_docs().lock() {
+        m.insert(video_id.to_string(), doc);
+    }
+}
+
+fn begin_structure_gesture(video_id: &str) {
+    let doc = load_active_structure_doc(video_id);
+    if let Ok(mut m) = structure_gesture_before().lock() {
+        m.insert(video_id.to_string(), doc.clone());
+    }
+    set_active_structure_doc(video_id, doc);
+}
+
+fn preview_structure_doc_to_ui(
+    app: &MainWindow,
+    video_id: &str,
+    doc: &yt_shortmaker_core::plano::schema::PlanoDocument,
+) {
+    let selected: String = app.get_structure_selected_layer_id().into();
+    let canvas = document_to_canvas_layers(doc, &selected, video_id);
+    let rows = document_to_layer_rows(doc, &selected);
+    app.set_structure_canvas_layers(std::rc::Rc::new(slint::VecModel::from(canvas)).into());
+    app.set_structure_layers_model(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+    app.set_structure_document_dirty(true);
+}
+
+fn finish_structure_gesture(app: &MainWindow, video_id: &str) {
+    let doc = load_active_structure_doc(video_id);
+    let before = structure_gesture_before()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(video_id));
+    let path = structure_path_for(video_id);
+    match yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc) {
+        Ok(()) => {
+            if let Ok(json) = serde_json::to_string(&doc) {
+                if let Ok(db_path) = session::db_path() {
+                    if let Ok(conn) = session::init_db(&db_path) {
+                        let _ = session::upsert_video_structure(&conn, video_id, &json);
+                    }
+                }
+            }
+            if let Some(b) = before {
+                // Only record history when something actually changed.
+                if b != doc {
+                    record_structure_history(video_id, &b);
+                }
+            }
+            app.set_structure_document_dirty(false);
+            append_structure_log(
+                app,
+                "INFO",
+                "structure",
+                &format!("document saved for {video_id}"),
+            );
+            refresh_structure_ui(app);
+        }
+        Err(e) => app.set_structure_status(format!("{}: {e}", t!("error")).into()),
+    }
+}
+
 fn resolve_active_video_path(app: &MainWindow) -> Option<std::path::PathBuf> {
     let vid = active_video_id(app);
     if vid.trim().is_empty() {
@@ -873,6 +981,15 @@ fn refresh_structure_ui(app: &MainWindow) {
     if path.exists() {
         match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy()) {
             Ok(doc) => {
+                // Keep in-memory gesture cache in sync unless a drag is in progress.
+                let gesture_active = structure_gesture_before()
+                    .lock()
+                    .ok()
+                    .map(|m| m.contains_key(&vid))
+                    .unwrap_or(false);
+                if !gesture_active {
+                    set_active_structure_doc(&vid, doc.clone());
+                }
                 let canvas = document_to_canvas_layers(&doc, &selected, &vid);
                 let rows = document_to_layer_rows(&doc, &selected);
                 app.set_structure_canvas_layers(
@@ -1041,6 +1158,7 @@ where
                         }
                     }
                     record_structure_history(&vid, &before);
+                    set_active_structure_doc(&vid, doc.clone());
                     app.set_structure_document_dirty(false);
                     append_structure_log(
                         app,
@@ -2215,42 +2333,68 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    app.on_drag_structure_start({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    return;
+                }
+                app.set_structure_selected_layer_id(id);
+                begin_structure_gesture(&vid);
+            }
+        }
+    });
+
     app.on_move_structure_layer({
         let app_weak = app_weak.clone();
         move |id, dx, dy| {
             if let Some(app) = app_weak.upgrade() {
-                let vid: String = app.get_structure_selected_video_id().into();
-                let vid = if vid.trim().is_empty() {
-                    app.get_video_id().to_string()
-                } else {
-                    vid
-                };
+                let vid = active_video_id(&app);
                 if vid.trim().is_empty() {
                     return;
                 }
                 // Ignore tiny jitter to avoid model thrash
-                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                if dx.abs() < 0.05 && dy.abs() < 0.05 {
                     return;
                 }
-                let path = structure_path_for(&vid);
-                let mut doc =
-                    match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
-                    {
-                        Ok(d) => d,
-                        Err(_) => return,
-                    };
-                let before = doc.clone();
+                // In-memory preview: no disk, no history, no full refresh.
+                let mut doc = load_active_structure_doc(&vid);
                 if doc.move_layer(id.as_str(), dx, dy).is_err() {
                     return;
                 }
-                // Persist immediately for Phase movement; explicit Save still validates.
-                if yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc)
-                    .is_ok()
-                {
-                    app.set_structure_selected_layer_id(id);
-                    record_structure_history(&vid, &before);
-                    refresh_structure_ui(&app);
+                set_active_structure_doc(&vid, doc.clone());
+                app.set_structure_selected_layer_id(id);
+                preview_structure_doc_to_ui(&app, &vid, &doc);
+            }
+        }
+    });
+
+    app.on_drag_structure_finish({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    return;
                 }
+                let _ = id;
+                finish_structure_gesture(&app, &vid);
+            }
+        }
+    });
+
+    app.on_resize_structure_start({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    return;
+                }
+                app.set_structure_selected_layer_id(id);
+                begin_structure_gesture(&vid);
             }
         }
     });
@@ -2259,41 +2403,44 @@ fn main() -> anyhow::Result<()> {
         let app_weak = app_weak.clone();
         move |id, handle, dx, dy| {
             if let Some(app) = app_weak.upgrade() {
-                let vid: String = app.get_structure_selected_video_id().into();
-                let vid = if vid.trim().is_empty() {
-                    app.get_video_id().to_string()
-                } else {
-                    vid
-                };
+                let vid = active_video_id(&app);
                 if vid.trim().is_empty() {
                     return;
                 }
-                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                if dx.abs() < 0.05 && dy.abs() < 0.05 {
                     return;
                 }
-                let path = structure_path_for(&vid);
-                let mut doc =
-                    match yt_shortmaker_core::plano::schema::load_document(&path.to_string_lossy())
-                    {
-                        Ok(d) => d,
-                        Err(_) => return,
-                    };
-                let before = doc.clone();
+                let mut doc = load_active_structure_doc(&vid);
                 if doc
                     .resize_with_handle(id.as_str(), handle.as_str(), dx, dy)
                     .is_err()
                 {
                     return;
                 }
-                if yt_shortmaker_core::plano::schema::save_document(&path.to_string_lossy(), &doc)
-                    .is_ok()
-                {
-                    app.set_structure_selected_layer_id(id);
-                    record_structure_history(&vid, &before);
-                    refresh_structure_ui(&app);
-                }
+                set_active_structure_doc(&vid, doc.clone());
+                app.set_structure_selected_layer_id(id);
+                preview_structure_doc_to_ui(&app, &vid, &doc);
             }
         }
+    });
+
+    app.on_resize_structure_finish({
+        let app_weak = app_weak.clone();
+        move |id| {
+            if let Some(app) = app_weak.upgrade() {
+                let vid = active_video_id(&app);
+                if vid.trim().is_empty() {
+                    return;
+                }
+                let _ = id;
+                finish_structure_gesture(&app, &vid);
+            }
+        }
+    });
+
+    app.on_center_structure_canvas(|| {
+        // Centering is handled in Slint (canvas.center-frame / fit).
+        // Kept for compatibility; no Rust work needed.
     });
 
     app.on_toggle_structure_layer({
